@@ -27,6 +27,10 @@ Or clone and `make build`: one static binary, no runtime dependencies.
 Run `lazykuma`, pick **Add instance**, give it a name and the address you open Kuma at, and log in.
 From then on it connects by itself.
 
+Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
+menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
+token is tied to the URL it was issued for, not the name.
+
 | Key | |
 |---|---|
 | `↑/k` `↓/j` | move |
@@ -36,6 +40,7 @@ From then on it connects by itself.
 | `esc` | back |
 | `?` | help |
 | `q` | quit, from the menu |
+| `ctrl+c` | quit, from anywhere |
 
 The menu footer says which instances answer: `home ok   vps down   lab no cred`.
 
@@ -44,9 +49,15 @@ The menu footer says which instances answer: `home ok   vps down   lab no cred`.
 - `~/.config/lazykuma/config.toml`: the instances, name and URL. Safe to keep in your dotfiles.
 - `~/.local/state/lazykuma/tokens.json`: the login token of each instance, mode 0600.
 
+`$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured, if set, in place of `~/.config` and
+`~/.local/state`.
+
 Your password and 2FA code are sent to Kuma once, at login, and never written anywhere. When Kuma
 refuses a token (it expired, or you changed your password) the instance says `bad cred` and asks you
 to log in again.
+
+With an `http://` URL, the password and the token cross the network unencrypted. Use `https://` for
+any instance not on your own LAN.
 
 ## Requirements
 
