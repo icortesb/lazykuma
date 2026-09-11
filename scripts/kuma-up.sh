@@ -23,6 +23,10 @@ fi
 
 "$RUN" run -d --name "$NAME" -p "$PORT:3001" "$IMAGE" >/dev/null
 
+# Until Kuma is up, any failure removes the container rather than leaving it
+# half-started: make stops at this script and never reaches `down`.
+trap '"$RUN" rm -f "$NAME" >/dev/null 2>&1' EXIT
+
 url="http://localhost:$PORT"
 for _ in $(seq 1 60); do
 	if curl -fs "$url/setup-database-info" >/dev/null 2>&1; then
@@ -41,6 +45,7 @@ fi
 for _ in $(seq 1 60); do
 	if curl -fs "$url/api/entry-page" 2>/dev/null | grep -qv setup-database; then
 		echo "kuma-up: $url"
+		trap - EXIT
 		exit 0
 	fi
 	sleep 1
