@@ -101,14 +101,47 @@ func ValidURL(s string) error {
 	return nil
 }
 
+// header is the comment Save and AppendInstance start a fresh file with.
+const header = "# lazykuma instances. Tokens live elsewhere; this file is safe to share.\n\n"
+
 // Save writes the config.
 func Save(path string, c Config) error {
 	var b bytes.Buffer
-	b.WriteString("# lazykuma instances. Tokens live elsewhere; this file is safe to share.\n\n")
+	b.WriteString(header)
 	if err := toml.NewEncoder(&b).Encode(c); err != nil {
 		return err
 	}
 	return writeAtomic(path, b.Bytes(), 0o644)
+}
+
+// AppendInstance adds one instance to the config file on disk, leaving
+// everything else in it alone: comments and entries Load could not use
+// (Save, which re-encodes only what Load accepted, would silently drop
+// them). A missing file starts from the same header Save writes.
+func AppendInstance(path string, in Instance) error {
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		data = []byte(header)
+	} else if err != nil {
+		return err
+	}
+
+	var b bytes.Buffer
+	b.Write(data)
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	if err := toml.NewEncoder(&b).Encode(Config{Instances: []Instance{in}}); err != nil {
+		return err
+	}
+
+	out := b.Bytes()
+	var check Config
+	if _, err := toml.Decode(string(out), &check); err != nil {
+		return fmt.Errorf("%s has a syntax error to fix before adding instances: %w", path, err)
+	}
+	return writeAtomic(path, out, 0o644)
 }
 
 // Tokens are the login tokens by instance name, in a file only the user can
@@ -155,9 +188,16 @@ func (t *Tokens) Set(name, token string) error {
 }
 
 // writeAtomic writes through a temporary file and a rename, so a crash never
-// leaves half a file behind.
+// leaves half a file behind. When path is a symlink (a dotfiles setup), the
+// temp file and the rename happen at its target, so the link itself is left
+// alone. A missing path is not an error: it is the first write.
 func writeAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
+	}
+
+	dir := filepath.Dir(target)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -177,5 +217,5 @@ func writeAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	return os.Rename(f.Name(), target)
 }

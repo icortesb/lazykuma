@@ -342,7 +342,7 @@ func (m Model) updateAdd(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.add = m.add.WithError(err)
 			return m, nil
 		}
-		if err := config.Save(m.deps.ConfigPath, next); err != nil {
+		if err := config.AppendInstance(m.deps.ConfigPath, in); err != nil {
 			m.add = m.add.WithError(fmt.Errorf("could not save %s: %w", m.deps.ConfigPath, err))
 			return m, nil
 		}

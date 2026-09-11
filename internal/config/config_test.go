@@ -95,6 +95,98 @@ func TestLoadBrokenFileWarns(t *testing.T) {
 	}
 }
 
+// TestAppendInstanceKeepsExistingContent is the fix for F1: appending must
+// not re-encode the file through Load's lenient decoder, or a comment and an
+// entry Load skips (kept on disk for the user to fix by hand) would vanish.
+func TestAppendInstanceKeepsExistingContent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	original := "# hand-edited, in dotfiles\n\n[[instance]]\nname = \"\"\nurl = \"http://bad.lan\"\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendInstance(path, Instance{Name: "home", URL: "http://kuma.lan"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(got), original) {
+		t.Fatalf("existing content changed:\n%s", got)
+	}
+
+	c, warns, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings = %v, want the empty-name entry still skipped", warns)
+	}
+	if len(c.Instances) != 1 || c.Instances[0] != (Instance{Name: "home", URL: "http://kuma.lan"}) {
+		t.Fatalf("instances = %+v", c.Instances)
+	}
+}
+
+func TestAppendInstanceSyntaxErrorLeavesFileUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	broken := "[[instance]\nname = "
+	if err := os.WriteFile(path, []byte(broken), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendInstance(path, Instance{Name: "home", URL: "http://kuma.lan"}); err == nil {
+		t.Fatal("want an error for a broken config file")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != broken {
+		t.Fatalf("file changed: %q, %v", got, err)
+	}
+}
+
+func TestAppendInstanceThroughSymlinkStaysASymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real", "config.toml")
+	if err := Save(target, Config{}); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.toml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := AppendInstance(link, Instance{Name: "home", URL: "http://kuma.lan"}); err != nil {
+		t.Fatal(err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the config path is no longer a symlink")
+	}
+	linkTarget, err := os.Readlink(link)
+	if err != nil || linkTarget != target {
+		t.Fatalf("symlink now points at %q, %v", linkTarget, err)
+	}
+
+	c, warns, err := Load(target)
+	if err != nil || len(warns) != 0 || len(c.Instances) != 1 || c.Instances[0].Name != "home" {
+		t.Fatalf("target = %+v %v %v", c, warns, err)
+	}
+}
+
+func TestAppendInstanceCreatesMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "config.toml")
+	if err := AppendInstance(path, Instance{Name: "home", URL: "http://kuma.lan"}); err != nil {
+		t.Fatal(err)
+	}
+	c, warns, err := Load(path)
+	if err != nil || len(warns) != 0 || len(c.Instances) != 1 || c.Instances[0].Name != "home" {
+		t.Fatalf("loaded = %+v %v %v", c, warns, err)
+	}
+}
+
 func TestAddRejects(t *testing.T) {
 	c := Config{Instances: []Instance{{Name: "Home", URL: "http://a.lan"}}}
 	for _, in := range []Instance{
