@@ -144,17 +144,28 @@ func AppendInstance(path string, in Instance) error {
 	return writeAtomic(path, out, 0o644)
 }
 
+// tokenEntry is one instance's stored login, keyed by the URL it was issued
+// for: a token belongs to a host, not a name, so it must not follow a name
+// to a different URL.
+type tokenEntry struct {
+	URL   string `json:"url"`
+	Token string `json:"token"`
+}
+
 // Tokens are the login tokens by instance name, in a file only the user can
 // read. Passwords are never stored.
 type Tokens struct {
 	path string
 	mu   sync.Mutex
-	m    map[string]string
+	m    map[string]tokenEntry
 }
 
-// LoadTokens reads the token file; a missing one holds no tokens.
+// LoadTokens reads the token file; a missing one holds no tokens. An entry
+// in the old bare-string format (name to token, with no URL to check) is
+// ignored rather than failing the load: there are no released users, so
+// there is nothing to migrate, only a crash to avoid.
 func LoadTokens(path string) (*Tokens, error) {
-	t := &Tokens{path: path, m: map[string]string{}}
+	t := &Tokens{path: path, m: map[string]tokenEntry{}}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return t, nil
@@ -162,24 +173,38 @@ func LoadTokens(path string) (*Tokens, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := json.Unmarshal(data, &t.m); err != nil {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	for name, msg := range raw {
+		var e tokenEntry
+		if err := json.Unmarshal(msg, &e); err != nil {
+			continue // old format: a bare string, no URL to trust it for
+		}
+		t.m[name] = e
 	}
 	return t, nil
 }
 
-// Get is the token of an instance, or "".
-func (t *Tokens) Get(name string) string {
+// Get is the token of an instance, only when it was issued for url; a token
+// left over from before a URL change is not returned, so it is never sent
+// to a different host.
+func (t *Tokens) Get(name, url string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.m[name]
+	e := t.m[name]
+	if e.URL != url {
+		return ""
+	}
+	return e.Token
 }
 
-// Set stores an instance's token and writes the file.
-func (t *Tokens) Set(name, token string) error {
+// Set stores an instance's token for url and writes the file.
+func (t *Tokens) Set(name, url, token string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.m[name] = token
+	t.m[name] = tokenEntry{URL: url, Token: token}
 	data, err := json.MarshalIndent(t.m, "", "  ")
 	if err != nil {
 		return err

@@ -52,7 +52,7 @@ func run() error {
 	var p *tea.Program
 	ready := make(chan struct{})
 	start := func(in config.Instance) ui.Controller {
-		sup := kuma.NewSupervisor(in.URL, func() string { return tokens.Get(in.Name) }, func(ev kuma.Event) {
+		sup := kuma.NewSupervisor(in.URL, func() string { return tokens.Get(in.Name, in.URL) }, func(ev kuma.Event) {
 			select {
 			case <-ready:
 				p.Send(ui.InstanceEvent{Name: in.Name, Event: ev})

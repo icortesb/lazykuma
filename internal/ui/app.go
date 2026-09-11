@@ -315,7 +315,7 @@ func (m Model) loginFinished(msg loginDone) (tea.Model, tea.Cmd) {
 		m.login, cmd = m.login.WithResult(msg.err)
 		return m, cmd
 	}
-	if err := m.deps.Tokens.Set(msg.name, msg.token); err != nil {
+	if err := m.deps.Tokens.Set(msg.name, m.insts[i].cfg.URL, msg.token); err != nil {
 		m.login, _ = m.login.WithResult(fmt.Errorf("logged in, but the token could not be saved: %w", err))
 		return m, nil
 	}

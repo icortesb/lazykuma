@@ -233,7 +233,7 @@ func TestLoginFromTheMenu(t *testing.T) {
 	if want := []string{"http://kuma.lan admin pw ", "http://kuma.lan admin pw 123456"}; strings.Join(tried, "|") != strings.Join(want, "|") {
 		t.Fatalf("logins = %q", tried)
 	}
-	if h.tokens.Get("home") != "jwt-new" {
+	if h.tokens.Get("home", home.URL) != "jwt-new" {
 		t.Fatal("token not stored")
 	}
 	if h.ctrls["home"].retries != 1 {

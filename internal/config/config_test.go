@@ -207,10 +207,10 @@ func TestTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tok.Get("home") != "" {
+	if tok.Get("home", "http://kuma.lan") != "" {
 		t.Fatal("token out of nowhere")
 	}
-	if err := tok.Set("home", "jwt-1"); err != nil {
+	if err := tok.Set("home", "http://kuma.lan", "jwt-1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -223,11 +223,49 @@ func TestTokens(t *testing.T) {
 	}
 
 	again, err := LoadTokens(path)
-	if err != nil || again.Get("home") != "jwt-1" {
-		t.Fatalf("reloaded = %q, %v", again.Get("home"), err)
+	if err != nil || again.Get("home", "http://kuma.lan") != "jwt-1" {
+		t.Fatalf("reloaded = %q, %v", again.Get("home", "http://kuma.lan"), err)
 	}
 	entries, _ := os.ReadDir(filepath.Dir(path))
 	if len(entries) != 1 {
 		t.Fatalf("left temporary files: %v", entries)
+	}
+}
+
+// TestTokensBelongToAURL is the fix for F3: a token stored for one URL must
+// never be handed back for another, even under the same instance name (a
+// hand edit, or a re-add pointing at a different host).
+func TestTokensBelongToAURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	tok, err := LoadTokens(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tok.Set("home", "http://a.lan", "jwt-a"); err != nil {
+		t.Fatal(err)
+	}
+	if got := tok.Get("home", "http://b.lan"); got != "" {
+		t.Fatalf("Get for the wrong URL = %q, want \"\"", got)
+	}
+	if got := tok.Get("home", "http://a.lan"); got != "jwt-a" {
+		t.Fatalf("Get for the right URL = %q", got)
+	}
+}
+
+// TestTokensOldFormatIgnored is the fix for F3: a token file from before the
+// URL was stored (a bare name-to-token string) has nothing to check a URL
+// against, so it must load without error and answer no token rather than
+// crash or hand out a token blind.
+func TestTokensOldFormatIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens.json")
+	if err := os.WriteFile(path, []byte(`{"home":"old-bare-token"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := LoadTokens(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tok.Get("home", "http://kuma.lan"); got != "" {
+		t.Fatalf("Get of an old-format entry = %q, want \"\"", got)
 	}
 }
