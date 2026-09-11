@@ -176,6 +176,24 @@ func TestSupervisorActionsOffline(t *testing.T) {
 	}
 }
 
+// TestSupervisorDialTimeout is the fix for F4: a server that accepts the
+// websocket but never sends loginRequired (or never finishes the handshake)
+// must not leave the instance "connecting" forever.
+func TestSupervisorDialTimeout(t *testing.T) {
+	f := newSlowFakeKuma(t, time.Hour, kumaLogin(false))
+	rec := &recorder{}
+	s := NewSupervisor(f.URL(), func() string { return "jwt" }, rec.out)
+	s.backoff = func(int) time.Duration { return 10 * time.Millisecond }
+	s.dialTimeout = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { s.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	eventually(t, "Disconnected", func() bool { return rec.has("kuma.Disconnected") })
+	eventually(t, "a second Connecting", func() bool { return rec.count("kuma.Connecting") >= 2 })
+}
+
 func TestDefaultBackoff(t *testing.T) {
 	want := []time.Duration{1, 2, 4, 8, 16, 30, 30}
 	for i, w := range want {

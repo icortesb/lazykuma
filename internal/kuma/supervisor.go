@@ -17,6 +17,9 @@ type Supervisor struct {
 
 	// backoff is the wait before reconnect attempt n (0-based).
 	backoff func(attempt int) time.Duration
+	// dialTimeout bounds Dial: a server that accepts the websocket but never
+	// sends loginRequired must not leave the instance "connecting" forever.
+	dialTimeout time.Duration
 
 	kick chan struct{}
 
@@ -30,11 +33,12 @@ type Supervisor struct {
 // the goroutine running Run.
 func NewSupervisor(url string, token func() string, out func(Event)) *Supervisor {
 	return &Supervisor{
-		url:     url,
-		token:   token,
-		out:     out,
-		backoff: defaultBackoff,
-		kick:    make(chan struct{}, 1),
+		url:         url,
+		token:       token,
+		out:         out,
+		backoff:     defaultBackoff,
+		dialTimeout: 30 * time.Second,
+		kick:        make(chan struct{}, 1),
 	}
 }
 
@@ -69,7 +73,9 @@ func (s *Supervisor) Run(ctx context.Context) {
 		}
 
 		s.out(Connecting{})
-		sess, err := Dial(ctx, s.url)
+		dctx, cancel := context.WithTimeout(ctx, s.dialTimeout)
+		sess, err := Dial(dctx, s.url)
+		cancel()
 		if err == nil {
 			if err = sess.LoginByToken(ctx, tok); err != nil {
 				sess.Close()
@@ -97,9 +103,12 @@ func (s *Supervisor) Run(ctx context.Context) {
 		}
 
 		attempt = 0
-		s.out(Connected{})
+		// The session is set before Connected goes out, so a pause right
+		// after it does not race a caller into ErrNotConnected.
 		s.setSession(sess)
+		s.out(Connected{})
 		unsupported := s.forward(ctx, sess)
+		sess.Close() // idempotent: released whether the server or ctx ended it
 		s.setSession(nil)
 		if ctx.Err() != nil {
 			return
