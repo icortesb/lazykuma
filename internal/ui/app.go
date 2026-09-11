@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/icortesb/lazykuma/internal/config"
 	"github.com/icortesb/lazykuma/internal/kuma"
@@ -357,7 +358,25 @@ func (m Model) updateAdd(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// View draws the current screen, then makes sure no line runs past the
+// terminal: a real Kuma error can be ~180 characters, and a menu that only
+// centres it lets the terminal cut off exactly the useful end.
 func (m Model) View() string {
+	return truncateLines(m.render(), m.width)
+}
+
+func truncateLines(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, width, "…")
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m Model) render() string {
 	switch m.screen {
 	case screenInstance:
 		in := m.insts[m.cur]

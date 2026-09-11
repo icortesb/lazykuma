@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -257,6 +260,42 @@ func TestLoginWhileKumaFloodsEvents(t *testing.T) {
 		case <-ctx.Done():
 			t.Fatalf("only %d of 1000 events arrived", n)
 		}
+	}
+}
+
+// TestBriefOfADialError is the fix for F2: a real dial error to a closed
+// local port is ~180 characters; Brief must shrink it to the useful end.
+func TestBriefOfADialError(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close() // nothing listens there now
+
+	_, err = Dial(context.Background(), "http://"+addr)
+	if err == nil {
+		t.Fatal("Dial to a closed port succeeded")
+	}
+	got := Brief(err)
+	if !strings.Contains(got, "connection refused") {
+		t.Fatalf("Brief(%v) = %q, want it to mention connection refused", err, got)
+	}
+	if len(got) >= 60 {
+		t.Fatalf("Brief(%v) = %q is %d chars, want under 60", err, got, len(got))
+	}
+}
+
+func TestBriefOfAReplyError(t *testing.T) {
+	if got := Brief(&ReplyError{Msg: "authInvalidToken"}); got != "authInvalidToken" {
+		t.Fatalf("Brief = %q", got)
+	}
+}
+
+func TestBriefOfADeadline(t *testing.T) {
+	err := fmt.Errorf("kuma: pauseMonitor: %w", context.DeadlineExceeded)
+	if got := Brief(err); got != "timed out" {
+		t.Fatalf("Brief = %q", got)
 	}
 }
 

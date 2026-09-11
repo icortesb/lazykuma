@@ -122,7 +122,7 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 	case kuma.Disconnected:
 		in.Conn = ConnDown
 		if ev.Err != nil {
-			in.Detail = ev.Err.Error()
+			in.Detail = kuma.Brief(ev.Err)
 		}
 		return goStale(in, now)
 	case kuma.AuthFailed:

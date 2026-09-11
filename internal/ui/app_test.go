@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -321,4 +322,33 @@ func TestMenuFitsNarrowTerminal(t *testing.T) {
 	h := newHarness(t, home, vps)
 	h.send(tea.WindowSizeMsg{Width: 60, Height: 24})
 	assertFits(t, h.view(), 60)
+}
+
+// TestLongDialErrorFitsAndShowsCause is the fix for F2: a real dial error
+// runs to ~180 characters; the menu must show the useful end of it (what
+// state.Apply keeps via kuma.Brief) rather than let the terminal cut off an
+// arbitrary, unhelpful prefix.
+func TestLongDialErrorFitsAndShowsCause(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close() // nothing listens there now
+	_, dialErr := kuma.Dial(context.Background(), "http://"+addr)
+	if dialErr == nil {
+		t.Fatal("dial to a closed port succeeded")
+	}
+
+	h := newHarness(t, home)
+	h.event("home", kuma.Disconnected{Err: dialErr})
+
+	for _, w := range []int{100, 60} {
+		h.send(tea.WindowSizeMsg{Width: w, Height: 24})
+		v := h.view()
+		if !strings.Contains(v, "connection refused") {
+			t.Fatalf("view at width %d lacks the cause:\n%s", w, v)
+		}
+		assertFits(t, v, w)
+	}
 }

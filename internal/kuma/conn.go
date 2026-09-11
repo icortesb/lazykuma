@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"sync"
@@ -29,6 +30,38 @@ var (
 type ReplyError struct{ Msg string }
 
 func (e *ReplyError) Error() string { return "kuma: " + e.Msg }
+
+// Brief is a short, human cause for err, meant to fit a menu line even after
+// a wide terminal is accounted for: a real dial error can run to 180
+// characters ("kuma: failed to WebSocket dial: failed to send handshake
+// request: Get ...: dial tcp ...: connect: connection refused"), most of it
+// noise once the reader just wants to know why. Never "" for a non-nil err.
+func Brief(err error) string {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		return opErr.Err.Error()
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return dnsErr.Err
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timed out"
+	}
+	var replyErr *ReplyError
+	if errors.As(err, &replyErr) {
+		return replyErr.Msg
+	}
+	// Otherwise, the innermost error: whatever %w wrapping added on the way
+	// up is our own context, not the reason.
+	for {
+		next := errors.Unwrap(err)
+		if next == nil {
+			return err.Error()
+		}
+		err = next
+	}
+}
 
 // IsAuth reports whether err means Kuma refused the credentials or the token.
 func IsAuth(err error) bool {
