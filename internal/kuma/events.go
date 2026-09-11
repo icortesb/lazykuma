@@ -209,7 +209,9 @@ func DecodeEvent(name string, args []json.RawMessage) (ev Event, ok bool, err er
 			hl.Beats = append(hl.Beats, b)
 		}
 		if len(args) > 2 {
-			json.Unmarshal(args[2], &hl.Overwrite)
+			// Lenient on purpose: an odd flag leaves Overwrite false, and a
+			// merge is safe because beats are deduplicated by time.
+			_ = json.Unmarshal(args[2], &hl.Overwrite)
 		}
 		return hl, true, nil
 
