@@ -123,7 +123,9 @@ func Dial(ctx context.Context, baseURL string) (*Session, error) {
 	case <-s.ready:
 		return s, nil
 	case <-s.done:
-		return nil, fmt.Errorf("kuma: connection ended before the server was ready: %w", s.Err())
+		err := s.Err()
+		s.Close()
+		return nil, fmt.Errorf("kuma: connection ended before the server was ready: %w", err)
 	case <-ctx.Done():
 		s.Close()
 		return nil, fmt.Errorf("kuma: waiting for the server: %w", ctx.Err())

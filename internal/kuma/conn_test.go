@@ -139,6 +139,24 @@ func TestDialGivesUpWhenKumaNeverListens(t *testing.T) {
 	}
 }
 
+func TestDialFailsWhenServerDropsBeforeReady(t *testing.T) {
+	f := newSlowFakeKuma(t, time.Hour, nil)
+	go func() {
+		eventually(t, "the connect packet", func() bool { return f.received(frameConnect) })
+		time.Sleep(50 * time.Millisecond) // the fake answers 40 and info, then Dial waits
+		f.drop()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	s, err := Dial(ctx, f.URL())
+	if err == nil || s != nil {
+		t.Fatalf("Dial = %v, %v; want an error", s, err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v: Dial waited for the deadline instead of noticing the drop", err)
+	}
+}
+
 func TestSessionPauseResume(t *testing.T) {
 	f := newFakeKuma(t, kumaLogin(false))
 	s := dial(t, f)
