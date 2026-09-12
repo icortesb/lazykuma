@@ -100,6 +100,19 @@ func (m Monitor) Status() Status {
 	return StatusUnknown
 }
 
+// incidentsKept is how many state changes an instance remembers: enough to
+// fill the incidents screen without growing without bound.
+const incidentsKept = 200
+
+// Incident is one monitor changing state, the material of the incidents
+// screen.
+type Incident struct {
+	MonitorID int
+	Time      time.Time
+	Status    kuma.Status
+	Msg       string
+}
+
 // Instance is everything known about one Kuma.
 type Instance struct {
 	Conn       Conn
@@ -108,6 +121,24 @@ type Instance struct {
 	Monitors   map[int]Monitor
 	LastEvent  time.Time // the last thing the server said
 	StaleSince time.Time // when the data stopped being live; zero while connected
+
+	// Channels are the notification channels this Kuma sends alerts through.
+	Channels []kuma.Notification
+	// Maintenances are its maintenance windows, by id.
+	Maintenances map[int]kuma.Maintenance
+	// Types are the monitor types it supports, for the type picker.
+	Types []string
+	// Incidents are the state changes it reported, oldest first.
+	Incidents []Incident
+}
+
+// RecentIncidents is the newest n state changes, newest first.
+func (in Instance) RecentIncidents(n int) []Incident {
+	out := make([]Incident, 0, min(n, len(in.Incidents)))
+	for i := len(in.Incidents) - 1; i >= 0 && len(out) < n; i-- {
+		out = append(out, in.Incidents[i])
+	}
+	return out
 }
 
 // Apply folds one event into the instance.
@@ -166,6 +197,7 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 		in = update(in, ev.Beat.MonitorID, func(m *Monitor) {
 			m.Beats = mergeBeats(m.Beats, []kuma.Beat{ev.Beat})
 		})
+		in = addIncidents(in, []kuma.Beat{ev.Beat})
 	case kuma.HeartbeatList:
 		in = update(in, ev.MonitorID, func(m *Monitor) {
 			if ev.Overwrite {
@@ -174,17 +206,51 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 				m.Beats = mergeBeats(m.Beats, ev.Beats)
 			}
 		})
+		in = addIncidents(in, ev.Beats)
 	case kuma.AvgPing:
 		in = update(in, ev.MonitorID, func(m *Monitor) { m.AvgPing, m.HasAvgPing = ev.Ms, ev.Valid })
 	case kuma.Uptime:
 		if ev.Period == "24" {
 			in = update(in, ev.MonitorID, func(m *Monitor) { m.Uptime24, m.HasUptime = ev.Ratio, true })
 		}
+	case kuma.NotificationList:
+		in.Channels = ev.Notifications
+	case kuma.MaintenanceList:
+		in.Maintenances = ev.Maintenances
+	case kuma.MonitorTypes:
+		in.Types = ev.All()
 	case kuma.CertInfo:
 		in = update(in, ev.MonitorID, func(m *Monitor) {
 			m.CertDays, m.HasCert = ev.DaysRemaining, ev.Valid
 		})
 	}
+	return in
+}
+
+// addIncidents records the important beats among these: Kuma marks a beat
+// important when the monitor changed state, which is exactly an incident.
+// Repeats are dropped, so a reconnect's replayed history adds nothing.
+func addIncidents(in Instance, beats []kuma.Beat) Instance {
+	fresh := make([]Incident, 0, len(beats))
+	for _, b := range beats {
+		if !b.Important {
+			continue
+		}
+		inc := Incident{MonitorID: b.MonitorID, Time: b.Time, Status: b.Status, Msg: b.Msg}
+		if !slices.Contains(in.Incidents, inc) {
+			fresh = append(fresh, inc)
+		}
+	}
+	if len(fresh) == 0 {
+		return in
+	}
+	all := make([]Incident, 0, len(in.Incidents)+len(fresh))
+	all = append(append(all, in.Incidents...), fresh...)
+	sort.SliceStable(all, func(i, j int) bool { return all[i].Time.Before(all[j].Time) })
+	if len(all) > incidentsKept {
+		all = all[len(all)-incidentsKept:]
+	}
+	in.Incidents = all
 	return in
 }
 

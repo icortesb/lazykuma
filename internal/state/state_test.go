@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -204,5 +205,73 @@ func TestSortedByNameAfterDown(t *testing.T) {
 		if names[i] != want[i] {
 			t.Fatalf("order = %v, want %v", names, want)
 		}
+	}
+}
+
+func beatAt(id int, min int, status kuma.Status, important bool, msg string) kuma.Beat {
+	return kuma.Beat{
+		MonitorID: id, Status: status, Important: important, Msg: msg,
+		Time: t0.Add(time.Duration(min) * time.Minute),
+	}
+}
+
+func TestIncidentsCollectStateChanges(t *testing.T) {
+	in := Apply(Instance{}, kuma.HeartbeatList{MonitorID: 1, Beats: []kuma.Beat{
+		beatAt(1, 0, kuma.StatusUp, true, "200 - OK"),
+		beatAt(1, 1, kuma.StatusUp, false, "200 - OK"),
+		beatAt(1, 2, kuma.StatusDown, true, "connect ECONNREFUSED"),
+	}}, t0)
+	in = Apply(in, kuma.Heartbeat{Beat: beatAt(1, 3, kuma.StatusUp, true, "200 - OK")}, t0)
+
+	if len(in.Incidents) != 3 {
+		t.Fatalf("incidents = %+v", in.Incidents)
+	}
+	// Newest first, and only the beats Kuma marked important.
+	got := in.RecentIncidents(2)
+	if len(got) != 2 || !got[0].Time.After(got[1].Time) || got[1].Msg != "connect ECONNREFUSED" {
+		t.Fatalf("recent = %+v", got)
+	}
+
+	// A reconnect replays the same history: it must not double it.
+	in = Apply(in, kuma.HeartbeatList{MonitorID: 1, Overwrite: true, Beats: []kuma.Beat{
+		beatAt(1, 0, kuma.StatusUp, true, "200 - OK"),
+		beatAt(1, 2, kuma.StatusDown, true, "connect ECONNREFUSED"),
+	}}, t0)
+	if len(in.Incidents) != 3 {
+		t.Fatalf("replay changed incidents: %+v", in.Incidents)
+	}
+}
+
+func TestIncidentsCapped(t *testing.T) {
+	in := Instance{}
+	for i := 0; i < incidentsKept+10; i++ {
+		in = Apply(in, kuma.Heartbeat{Beat: beatAt(1, i, kuma.StatusDown, true, "down")}, t0)
+	}
+	if len(in.Incidents) != incidentsKept {
+		t.Fatalf("kept %d incidents", len(in.Incidents))
+	}
+	if newest := in.RecentIncidents(1)[0]; !newest.Time.Equal(t0.Add(time.Duration(incidentsKept+9) * time.Minute)) {
+		t.Fatalf("dropped the newest: %+v", newest)
+	}
+}
+
+func TestChannelsMaintenancesAndTypes(t *testing.T) {
+	in := Apply(Instance{}, kuma.NotificationList{Notifications: []kuma.Notification{
+		{ID: 1, Name: "tg", Type: "telegram", IsDefault: true, Config: map[string]any{"type": "telegram"}},
+	}}, t0)
+	in = Apply(in, kuma.MaintenanceList{Maintenances: map[int]kuma.Maintenance{
+		3: {ID: 3, Title: "deploy", Strategy: "manual", Status: "under-maintenance", Active: true},
+	}}, t0)
+	in = Apply(in, kuma.MonitorTypes{Types: []string{"dns", "port"}}, t0)
+
+	if len(in.Channels) != 1 || in.Channels[0].Type != "telegram" {
+		t.Errorf("channels = %+v", in.Channels)
+	}
+	if m := in.Maintenances[3]; m.Title != "deploy" || m.Status != "under-maintenance" {
+		t.Errorf("maintenances = %+v", in.Maintenances)
+	}
+	// The types the server reports, plus the classic ones it leaves out.
+	if !slices.Contains(in.Types, "dns") || !slices.Contains(in.Types, "http") {
+		t.Errorf("types = %v", in.Types)
 	}
 }
