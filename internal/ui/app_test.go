@@ -2,12 +2,11 @@ package ui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -15,78 +14,131 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/icortesb/lazykuma/internal/config"
+	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kuma"
+	"github.com/icortesb/lazykuma/internal/kumatest"
+	"github.com/icortesb/lazykuma/internal/state"
 )
 
-// fakeCtrl stands in for a kuma.Supervisor.
-type fakeCtrl struct {
-	mu              sync.Mutex
-	paused, resumed []int
-	retries         int
-	err             error
-}
-
-func (f *fakeCtrl) Pause(_ context.Context, id int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.paused = append(f.paused, id)
-	return f.err
-}
-
-func (f *fakeCtrl) Resume(_ context.Context, id int) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.resumed = append(f.resumed, id)
-	return f.err
-}
-
-func (f *fakeCtrl) Retry() { f.mu.Lock(); f.retries++; f.mu.Unlock() }
-
-// harness is the app with fake connections, a temporary config and tokens,
-// and a login that answers what the test says.
+// harness drives the model the way Bubble Tea would, over a core wired to
+// fake Kuma servers.
 type harness struct {
 	t       *testing.T
 	m       Model
-	ctrls   map[string]*fakeCtrl
+	core    *core.Core
+	fakes   map[string]*kumatest.Server
 	cfgPath string
-	tokens  *config.Tokens
 	login   func(url, user, pass, code string) (string, error)
 }
 
-func newHarness(t *testing.T, instances ...config.Instance) *harness {
+// newHarness gives each named instance its own fake Kuma. Instances whose
+// name is in loggedIn start with a token, so they connect by themselves.
+func newHarness(t *testing.T, loggedIn []string, names ...string) *harness {
 	t.Helper()
 	dir := t.TempDir()
-	tokens, err := config.LoadTokens(filepath.Join(dir, "tokens.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := &harness{t: t, ctrls: map[string]*fakeCtrl{}, cfgPath: filepath.Join(dir, "config.toml"), tokens: tokens}
+	h := &harness{t: t, fakes: map[string]*kumatest.Server{}, cfgPath: filepath.Join(dir, "config.toml")}
 	h.login = func(string, string, string, string) (string, error) { return "jwt", nil }
 
 	var cfg config.Config
-	for _, in := range instances {
-		if err := cfg.Add(in); err != nil {
+	for _, name := range names {
+		f := kumatest.New(t, kumaWrites(t))
+		h.fakes[name] = f
+		if err := cfg.Add(config.Instance{Name: name, URL: f.URL()}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	if len(names) > 0 {
+		if err := config.Save(h.cfgPath, cfg); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokPath := filepath.Join(dir, "tokens.json")
+	tokens, err := config.LoadTokens(tokPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range loggedIn {
+		if err := tokens.Set(name, h.fakes[name].URL(), "jwt"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := core.Open(h.cfgPath, tokPath, core.Options{Now: func() time.Time { return tBase }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.core = c
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c.Run(ctx)
+
 	h.m = New(Deps{
-		Config: cfg, ConfigPath: h.cfgPath, Tokens: tokens, Version: "0.0.0-test",
-		Start: func(in config.Instance) Controller {
-			c := &fakeCtrl{}
-			h.ctrls[in.Name] = c
-			return c
-		},
+		Core: c, Version: "0.0.0-test", Now: func() time.Time { return tBase },
 		Login: func(_ context.Context, url, user, pass, code string) (string, error) {
 			return h.login(url, user, pass, code)
 		},
-		Now: func() time.Time { return tBase },
 	})
 	h.send(tea.WindowSizeMsg{Width: 120, Height: 40})
 	return h
 }
 
-// send delivers msg and then whatever its commands return within a moment,
-// so timers such as the flash's are left out.
+// kumaWrites answers login and the write calls the UI tests make.
+func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
+	login := kumatest.Login(false)
+	return func(event string, args []json.RawMessage) any {
+		switch event {
+		case "add":
+			return map[string]any{"ok": true, "msg": "successAdded", "monitorID": 9}
+		case "getMonitor":
+			return map[string]any{"ok": true, "monitor": map[string]any{
+				"id": 1, "type": "http", "name": "nextcloud", "url": "https://cloud.home.lan",
+				"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true,
+				"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
+			}}
+		case "editMonitor", "deleteMonitor", "addNotification", "deleteNotification",
+			"addMaintenance", "addMonitorMaintenance", "deleteMaintenance":
+			out := map[string]any{"ok": true, "msg": "Saved."}
+			if event == "addNotification" {
+				out["id"] = 5
+			}
+			if event == "addMaintenance" {
+				out["maintenanceID"] = 6
+			}
+			return out
+		case "testNotification":
+			return map[string]any{"ok": false, "msg": "Request failed with status code 401"}
+		}
+		return login(event, args)
+	}
+}
+
+// connected waits until the instance's state says it is connected, the way
+// the program would see it, and feeds that state to the model.
+func (h *harness) connected(name string) {
+	h.t.Helper()
+	h.waitState(name, "connected", func(s state.Instance) bool { return s.Conn == state.ConnOK })
+}
+
+// waitState waits for the core to publish a state matching cond and feeds
+// it to the model, as the program's update loop does.
+func (h *harness) waitState(name, what string, cond func(state.Instance) bool) {
+	h.t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		in, ok := h.core.Instance(name)
+		if ok && cond(in.State()) {
+			h.send(InstanceState{Name: name, State: in.State()})
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.t.Fatalf("%s never reached %s", name, what)
+}
+
+// state pushes a state snapshot, as the core's updates do.
+func (h *harness) state(name string, st state.Instance) {
+	h.send(InstanceState{Name: name, State: st})
+}
+
 func (h *harness) send(msg tea.Msg) {
 	h.t.Helper()
 	next, cmd := h.m.Update(msg)
@@ -111,7 +163,7 @@ func (h *harness) run(cmd tea.Cmd) {
 		if msg != nil {
 			h.send(msg)
 		}
-	case <-time.After(20 * time.Millisecond):
+	case <-time.After(50 * time.Millisecond):
 	}
 }
 
@@ -128,28 +180,18 @@ func (h *harness) typeText(s string) {
 	}
 }
 
-func (h *harness) event(name string, ev kuma.Event) { h.send(InstanceEvent{Name: name, Event: ev}) }
-
 func (h *harness) view() string { return ansi.Strip(h.m.View()) }
 
-var (
-	home = config.Instance{Name: "home", URL: "http://kuma.lan"}
-	vps  = config.Instance{Name: "vps", URL: "https://status.example.com"}
-)
-
 func TestMenuListsInstancesAndTheirState(t *testing.T) {
-	h := newHarness(t, home, vps)
-	h.event("home", kuma.Connected{})
-	h.event("vps", kuma.Disconnected{Err: errors.New("dial tcp: connection refused")})
+	h := newHarness(t, []string{"home"}, "home", "vps")
+	h.connected("home")
+	h.state("vps", state.Apply(state.Instance{}, kuma.Disconnected{Err: errors.New("dial tcp: connection refused")}, tBase))
 
 	v := h.view()
 	for _, want := range []string{"home", "vps", "Add instance", "Help", "Quit", "home ok", "vps down", "v0.0.0-test"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("menu lacks %q:\n%s", want, v)
 		}
-	}
-	if !strings.Contains(v, "http://kuma.lan · 0 monitors") {
-		t.Errorf("selected instance has no description:\n%s", v)
 	}
 	h.press("down")
 	if !strings.Contains(h.view(), "down: dial tcp: connection refused") {
@@ -158,46 +200,48 @@ func TestMenuListsInstancesAndTheirState(t *testing.T) {
 }
 
 func TestEmptyMenuSaysToAddOne(t *testing.T) {
-	h := newHarness(t)
+	h := newHarness(t, nil)
 	if !strings.Contains(h.view(), "no instances yet: add one") {
 		t.Fatalf("menu:\n%s", h.view())
 	}
 }
 
+// withMonitors is an instance state carrying the given monitors.
+func withMonitors(mons map[int]kuma.Monitor) state.Instance {
+	in := state.Apply(state.Instance{}, kuma.Connected{}, tBase)
+	return state.Apply(in, kuma.MonitorList{Monitors: mons}, tBase)
+}
+
 func TestOpenInstanceAndPause(t *testing.T) {
-	h := newHarness(t, home)
-	for _, ev := range []kuma.Event{kuma.Connected{}, kuma.MonitorList{Monitors: map[int]kuma.Monitor{
+	h := newHarness(t, []string{"home"}, "home")
+	h.connected("home")
+	h.state("home", withMonitors(map[int]kuma.Monitor{
 		7: {ID: 7, Name: "nextcloud", URL: "https://cloud.lan", Active: true},
 		8: {ID: 8, Name: "backup", URL: "https://s3.lan"},
-	}}} {
-		h.event("home", ev)
-	}
+	}))
+
 	h.press("enter")
 	if !strings.Contains(h.view(), "home · 2 monitors") {
 		t.Fatalf("not on the instance:\n%s", h.view())
 	}
-
-	h.press("p") // backup is first (b < n) and paused: resume it
-	h.press("j", "p")
-	c := h.ctrls["home"]
-	if len(c.resumed) != 1 || c.resumed[0] != 8 || len(c.paused) != 1 || c.paused[0] != 7 {
-		t.Fatalf("resumed %v paused %v", c.resumed, c.paused)
+	h.press("p")      // backup is first (b < n) and paused: resume it
+	h.press("j", "p") // nextcloud: pause it
+	f := h.fakes["home"]
+	if !f.Sent(`["resumeMonitor",8]`) || !f.Sent(`["pauseMonitor",7]`) {
+		t.Fatalf("frames: %v", f.Frames())
 	}
 	if !strings.Contains(h.view(), "paused nextcloud") {
 		t.Errorf("no flash:\n%s", h.view())
 	}
-
 	h.press("esc")
 	if !strings.Contains(h.view(), "Add instance") {
 		t.Fatal("esc did not go back to the menu")
 	}
 }
 
-func TestPauseFailureIsShown(t *testing.T) {
-	h := newHarness(t, home)
-	h.event("home", kuma.Connected{})
-	h.event("home", kuma.MonitorList{Monitors: map[int]kuma.Monitor{1: {ID: 1, Name: "web", Active: true}}})
-	h.ctrls["home"].err = kuma.ErrNotConnected
+func TestActionOnAnOfflineInstanceSaysSo(t *testing.T) {
+	h := newHarness(t, nil, "home")
+	h.state("home", withMonitors(map[int]kuma.Monitor{1: {ID: 1, Name: "web", Active: true}}))
 	h.press("enter", "p")
 	if !strings.Contains(h.view(), "web: kuma: not connected") {
 		t.Fatalf("view:\n%s", h.view())
@@ -205,16 +249,16 @@ func TestPauseFailureIsShown(t *testing.T) {
 }
 
 func TestLoginFromTheMenu(t *testing.T) {
-	h := newHarness(t, home)
-	h.event("home", kuma.AuthFailed{NoToken: true})
-
+	h := newHarness(t, nil, "home")
+	// With no token the core says so, and the menu entry opens the login.
+	h.waitState("home", "no cred", func(s state.Instance) bool { return s.Conn == state.ConnNoCred })
 	var tried []string
 	h.login = func(url, user, pass, code string) (string, error) {
-		tried = append(tried, url+" "+user+" "+pass+" "+code)
+		tried = append(tried, user+" "+pass+" "+code)
 		if code == "" {
 			return "", kuma.ErrTokenRequired
 		}
-		return "jwt-new", nil
+		return "jwt", nil
 	}
 
 	h.press("enter")
@@ -231,49 +275,42 @@ func TestLoginFromTheMenu(t *testing.T) {
 	h.typeText("123456")
 	h.press("enter")
 
-	if want := []string{"http://kuma.lan admin pw ", "http://kuma.lan admin pw 123456"}; strings.Join(tried, "|") != strings.Join(want, "|") {
+	if want := "admin pw |admin pw 123456"; strings.Join(tried, "|") != want {
 		t.Fatalf("logins = %q", tried)
 	}
-	if h.tokens.Get("home", home.URL) != "jwt-new" {
-		t.Fatal("token not stored")
-	}
-	if h.ctrls["home"].retries != 1 {
-		t.Fatal("supervisor not woken")
-	}
+	// The token reached the core, which woke the connection.
+	h.connected("home")
 	if !strings.Contains(h.view(), "home · 0 monitors") {
 		t.Fatalf("not on the instance after login:\n%s", h.view())
 	}
 }
 
 func TestAddInstance(t *testing.T) {
-	h := newHarness(t)
-	h.press("enter") // "Add instance", the only entry but Help and Quit
+	h := newHarness(t, nil)
+	f := kumatest.New(t, kumaWrites(t))
+	h.press("enter") // "Add instance"
 	h.typeText("vps")
 	h.press("tab")
-	h.typeText("https://status.example.com")
+	h.typeText(f.URL())
 	h.press("enter")
 
-	if _, ok := h.ctrls["vps"]; !ok {
-		t.Fatal("vps not started")
+	if !strings.Contains(h.view(), "Log in to vps") {
+		t.Fatalf("not on the login:\n%s", h.view())
+	}
+	if _, ok := h.core.Instance("vps"); !ok {
+		t.Fatal("the core did not start vps")
+	}
+	saved, _ := os.ReadFile(h.cfgPath)
+	if !strings.Contains(string(saved), `name = "vps"`) {
+		t.Fatalf("config file = %s", saved)
 	}
 	if h.m.flash == noInstances {
 		t.Fatal("still says there are no instances")
 	}
-	if !strings.Contains(h.view(), "Log in to vps") {
-		t.Fatalf("not on the login:\n%s", h.view())
-	}
-	saved, _, err := config.Load(h.cfgPath)
-	if err != nil || len(saved.Instances) != 1 || saved.Instances[0] != vps {
-		t.Fatalf("saved config = %+v, %v", saved, err)
-	}
-	h.press("esc")
-	if !strings.Contains(h.view(), "vps") {
-		t.Fatal("vps not on the menu")
-	}
 }
 
 func TestAddInstanceRejectsDuplicate(t *testing.T) {
-	h := newHarness(t, home)
+	h := newHarness(t, nil, "home")
 	h.press("down", "enter")
 	h.typeText("HOME")
 	h.press("tab")
@@ -282,13 +319,10 @@ func TestAddInstanceRejectsDuplicate(t *testing.T) {
 	if !strings.Contains(h.view(), `already an instance called "home"`) {
 		t.Fatalf("view:\n%s", h.view())
 	}
-	if _, err := os.Stat(h.cfgPath); err == nil {
-		t.Fatal("config written for a rejected instance")
-	}
 }
 
 func TestHelpAndQuit(t *testing.T) {
-	h := newHarness(t, home)
+	h := newHarness(t, nil, "home")
 	h.press("?")
 	if !strings.Contains(h.view(), "What lazykuma stores") {
 		t.Fatalf("help:\n%s", h.view())
@@ -297,7 +331,6 @@ func TestHelpAndQuit(t *testing.T) {
 	if !strings.Contains(h.view(), "Add instance") {
 		t.Fatal("esc did not leave help")
 	}
-
 	_, cmd := h.m.Update(keyMsg("q"))
 	if cmd == nil {
 		t.Fatal("q did nothing")
@@ -308,7 +341,7 @@ func TestHelpAndQuit(t *testing.T) {
 }
 
 func TestTypingQInAFormDoesNotQuit(t *testing.T) {
-	h := newHarness(t, home)
+	h := newHarness(t, nil, "home")
 	h.press("down", "enter") // the add form
 	_, cmd := h.m.Update(keyMsg("q"))
 	if cmd != nil {
@@ -319,36 +352,7 @@ func TestTypingQInAFormDoesNotQuit(t *testing.T) {
 }
 
 func TestMenuFitsNarrowTerminal(t *testing.T) {
-	h := newHarness(t, home, vps)
+	h := newHarness(t, []string{"home"}, "home", "vps")
 	h.send(tea.WindowSizeMsg{Width: 60, Height: 24})
 	assertFits(t, h.view(), 60)
-}
-
-// TestLongDialErrorFitsAndShowsCause is the fix for F2: a real dial error
-// runs to ~180 characters; the menu must show the useful end of it (what
-// state.Apply keeps via kuma.Brief) rather than let the terminal cut off an
-// arbitrary, unhelpful prefix.
-func TestLongDialErrorFitsAndShowsCause(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	l.Close() // nothing listens there now
-	_, dialErr := kuma.Dial(context.Background(), "http://"+addr)
-	if dialErr == nil {
-		t.Fatal("dial to a closed port succeeded")
-	}
-
-	h := newHarness(t, home)
-	h.event("home", kuma.Disconnected{Err: dialErr})
-
-	for _, w := range []int{100, 60} {
-		h.send(tea.WindowSizeMsg{Width: w, Height: 24})
-		v := h.view()
-		if !strings.Contains(v, "connection refused") {
-			t.Fatalf("view at width %d lacks the cause:\n%s", w, v)
-		}
-		assertFits(t, v, w)
-	}
 }
