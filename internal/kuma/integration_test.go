@@ -99,4 +99,89 @@ func TestIntegrationRealKuma(t *testing.T) {
 	if err := sup.Resume(ctx, monitorID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
+
+	// The writes, on a session of its own.
+	w, err := Dial(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if err := w.LoginByToken(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for range w.Events() {
+		}
+	}()
+
+	id, err := w.AddMonitor(ctx, RawMonitor{
+		"type": "http", "name": "lazykuma-writes", "url": "https://example.com", "method": "GET",
+		"interval": 60, "retryInterval": 60, "maxretries": 0, "timeout": 48, "maxredirects": 10,
+		"accepted_statuscodes": []string{"200-299"}, "expiryNotification": true,
+		"notificationIDList": map[string]bool{}, "conditions": []any{},
+		"kafkaProducerBrokers": []any{}, "kafkaProducerSaslOptions": map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("AddMonitor: %v", err)
+	}
+
+	full, err := w.GetMonitor(ctx, id)
+	if err != nil {
+		t.Fatalf("GetMonitor: %v", err)
+	}
+	if len(full) < 50 {
+		t.Fatalf("GetMonitor returned %d fields, expected the whole monitor", len(full))
+	}
+	full["name"] = "lazykuma-writes-renamed"
+	if err := w.EditMonitor(ctx, full); err != nil {
+		t.Fatalf("EditMonitor: %v", err)
+	}
+	// Kuma refuses a partial monitor rather than merging it, which is why
+	// an edit starts from GetMonitor.
+	if err := w.EditMonitor(ctx, RawMonitor{"id": full["id"], "name": "partial", "type": "http"}); err == nil {
+		t.Fatal("a partial editMonitor was accepted; the client may stop sending whole monitors")
+	}
+
+	cfg := map[string]any{
+		"name": "lazykuma-telegram", "type": "telegram", "isDefault": false, "applyExisting": false,
+		"telegramBotToken": "123:abc", "telegramChatID": "42", "telegramSendSilently": false,
+	}
+	nid, err := w.SaveNotification(ctx, cfg, 0)
+	if err != nil || nid == 0 {
+		t.Fatalf("SaveNotification: %d, %v", nid, err)
+	}
+	cfg["name"] = "lazykuma-telegram-renamed"
+	if _, err := w.SaveNotification(ctx, cfg, nid); err != nil {
+		t.Fatalf("SaveNotification(edit): %v", err)
+	}
+	// A test send reaches Telegram, which rejects the made-up token: the
+	// provider's own complaint is what the UI shows.
+	if err := w.TestNotification(ctx, cfg); err == nil {
+		t.Fatal("TestNotification with a bogus token succeeded")
+	}
+	if err := w.DeleteNotification(ctx, nid); err != nil {
+		t.Fatalf("DeleteNotification: %v", err)
+	}
+
+	mid, err := w.AddMaintenance(ctx, map[string]any{
+		"title": "lazykuma", "description": "", "strategy": "manual", "active": true,
+		"intervalDay": 1, "dateRange": []any{nil},
+		"timeRange": []any{map[string]any{"hours": 0, "minutes": 0}, map[string]any{"hours": 0, "minutes": 0}},
+		"weekdays":  []any{}, "daysOfMonth": []any{}, "timezoneOption": "SAME_AS_SERVER",
+	})
+	if err != nil {
+		t.Fatalf("AddMaintenance: %v", err)
+	}
+	if err := w.SetMaintenanceMonitors(ctx, mid, []int{id}); err != nil {
+		t.Fatalf("SetMaintenanceMonitors: %v", err)
+	}
+	if err := w.DeleteMaintenance(ctx, mid); err != nil {
+		t.Fatalf("DeleteMaintenance: %v", err)
+	}
+	if err := w.DeleteMonitor(ctx, id); err != nil {
+		t.Fatalf("DeleteMonitor: %v", err)
+	}
+	if _, err := w.GetMonitor(ctx, id); err == nil {
+		t.Fatal("GetMonitor still answers for a deleted monitor")
+	}
 }

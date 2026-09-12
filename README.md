@@ -27,6 +27,18 @@ Or clone and `make build`: one static binary, no runtime dependencies.
 Run `lazykuma`, pick **Add instance**, give it a name and the address you open Kuma at, and log in.
 From then on it connects by itself.
 
+Monitors are created and edited from the instance screen. Four types have a form of their own —
+HTTP, keyword, ping and TCP port — and every other type Kuma offers is reached through the field
+editor, which edits the object Kuma stores (values are JSON: `"text"`, `20`, `true`). The same
+editor opens on any monitor with `r`, for the fields a form does not show.
+
+Notification channels live under `c`: Telegram, webhook and email have forms, anything else uses
+the field editor, and `t` sends a test so a wrong token says so immediately. A channel marked as
+default applies to monitors created afterwards.
+
+`m` silences a monitor while you deploy — now until you end it, or between two times — and `M`
+lists what is silenced. `i` shows when monitors went down and came back, and why.
+
 Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
 token is tied to the URL it was issued for, not the name.
@@ -35,8 +47,13 @@ token is tied to the URL it was issued for, not the name.
 |---|---|
 | `↑/k` `↓/j` | move |
 | `enter` | open an instance, or log in to it |
+| `n` `e` `d` | create, edit or delete a monitor |
+| `r` | edit the selected monitor's fields directly |
 | `p` | pause or resume the selected monitor |
-| `/` | filter monitors by name or target |
+| `m` `M` | silence the selected monitor; list what is silenced |
+| `c` | the instance's notification channels |
+| `i` | the incident timeline |
+| `/` | filter |
 | `esc` | back |
 | `?` | help |
 | `q` | quit, from the menu |
