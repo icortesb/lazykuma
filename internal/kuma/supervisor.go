@@ -197,3 +197,13 @@ func (s *Supervisor) Resume(ctx context.Context, id int) error {
 	}
 	return sess.Resume(ctx, id)
 }
+
+// Session is the live connection, for the calls the Supervisor does not
+// wrap itself. It is ErrNotConnected while the instance is offline.
+func (s *Supervisor) Session() (*Session, error) {
+	sess := s.session()
+	if sess == nil {
+		return nil, ErrNotConnected
+	}
+	return sess, nil
+}

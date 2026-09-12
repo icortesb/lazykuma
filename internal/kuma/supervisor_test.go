@@ -93,7 +93,7 @@ func TestSupervisorWithoutTokenWaitsForRetry(t *testing.T) {
 	if af := rec.last().(AuthFailed); !af.NoToken {
 		t.Fatalf("got %+v, want NoToken", af)
 	}
-	if f.connCount() != 0 {
+	if f.ConnCount() != 0 {
 		t.Fatal("dialed without a token")
 	}
 
@@ -123,13 +123,13 @@ func TestSupervisorForwardsEventsAndActions(t *testing.T) {
 	s, rec := runSupervisor(t, f.URL(), &tokenBox{tok: "jwt"})
 
 	eventually(t, "Connected", func() bool { return rec.has("kuma.Connected") })
-	f.push(`42["avgPing","1",62]`)
+	f.Push(`42["avgPing","1",62]`)
 	eventually(t, "AvgPing", func() bool { return rec.has("kuma.AvgPing") })
 
 	if err := s.Pause(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
-	if !f.called("pauseMonitor") {
+	if !f.Called("pauseMonitor") {
 		t.Fatal("pause not sent")
 	}
 }
@@ -139,7 +139,7 @@ func TestSupervisorReconnects(t *testing.T) {
 	_, rec := runSupervisor(t, f.URL(), &tokenBox{tok: "jwt"})
 
 	eventually(t, "Connected", func() bool { return rec.has("kuma.Connected") })
-	f.drop()
+	f.Drop()
 	eventually(t, "Disconnected", func() bool { return rec.has("kuma.Disconnected") })
 	eventually(t, "a second Connected", func() bool { return rec.count("kuma.Connected") == 2 })
 }
@@ -147,7 +147,7 @@ func TestSupervisorReconnects(t *testing.T) {
 func TestSupervisorServerDown(t *testing.T) {
 	f := newFakeKuma(t, nil)
 	url := f.URL()
-	f.srv.Close() // nothing listens there any more
+	f.Close() // nothing listens there any more
 	_, rec := runSupervisor(t, url, &tokenBox{tok: "jwt"})
 
 	eventually(t, "two attempts", func() bool { return rec.count("kuma.Disconnected") >= 2 })
@@ -158,7 +158,7 @@ func TestSupervisorRefusesKumaV1(t *testing.T) {
 	_, rec := runSupervisor(t, f.URL(), &tokenBox{tok: "jwt"})
 
 	eventually(t, "Connected", func() bool { return rec.has("kuma.Connected") })
-	f.push(`42["info",{"version":"1.23.16"}]`)
+	f.Push(`42["info",{"version":"1.23.16"}]`)
 	eventually(t, "Unsupported", func() bool { return rec.has("kuma.Unsupported") })
 	if u := rec.last().(Unsupported); u.Version != "1.23.16" {
 		t.Fatalf("got %+v", u)

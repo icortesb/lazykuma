@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -147,5 +148,53 @@ func TestMonitorTarget(t *testing.T) {
 		if got := tt.m.Target(); got != tt.want {
 			t.Errorf("%+v.Target() = %q, want %q", tt.m, got, tt.want)
 		}
+	}
+}
+
+func TestDecodeNotificationList(t *testing.T) {
+	nl := fixture(t, "notificationList", 1).(NotificationList)
+	if len(nl.Notifications) == 0 {
+		t.Fatal("no channels")
+	}
+	n := nl.Notifications[0]
+	if n.ID != 1 || n.Name != "probe-telegram-renamed" || !n.IsDefault || !n.Active {
+		t.Errorf("channel = %+v", n)
+	}
+	// The provider and its fields live inside the config string.
+	if n.Type != "telegram" || n.Config["telegramBotToken"] != "123:abc" || n.Config["telegramChatID"] != "42" {
+		t.Errorf("config = %+v", n.Config)
+	}
+}
+
+func TestDecodeMaintenanceList(t *testing.T) {
+	ml := fixture(t, "maintenanceList", 1).(MaintenanceList)
+	m, ok := ml.Maintenances[2]
+	if !ok {
+		t.Fatalf("no maintenance 2 in %+v", ml.Maintenances)
+	}
+	want := Maintenance{
+		ID: 2, Title: "probe window", Strategy: "single", Status: "under-maintenance", Active: true,
+		Start: "2026-09-12 10:00:00", End: "2026-09-12 12:00:00", Timezone: "America/Argentina/Buenos_Aires",
+	}
+	if m != want {
+		t.Errorf("maintenance = %+v, want %+v", m, want)
+	}
+}
+
+func TestDecodeMonitorTypes(t *testing.T) {
+	mt := fixture(t, "monitorTypeList", 1).(MonitorTypes)
+	// The server's own list leaves out the types Kuma implements outside its
+	// type registry, http among them.
+	if len(mt.Types) != 25 || mt.Types[0] != "dns" || slices.Contains(mt.Types, "http") {
+		t.Fatalf("reported types = %v", mt.Types)
+	}
+	all := mt.All()
+	for _, want := range []string{"dns", "docker", "http", "keyword", "ping", "port", "push"} {
+		if !slices.Contains(all, want) {
+			t.Errorf("All() lacks %q: %v", want, all)
+		}
+	}
+	if len(all) != len(slices.Compact(append([]string{}, all...))) {
+		t.Errorf("All() repeats a type: %v", all)
 	}
 }
