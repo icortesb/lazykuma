@@ -20,6 +20,12 @@ const (
 	formSubmit
 )
 
+// echoPassword hides what is typed in a secret field.
+const echoPassword = textinput.EchoPassword
+
+// textinputModel names the Bubbles text field this package fills forms with.
+type textinputModel = textinput.Model
+
 // form is a column of text fields: tab and the arrows move between them,
 // enter on the last one submits, esc cancels.
 type form struct {
