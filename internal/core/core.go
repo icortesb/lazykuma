@@ -82,10 +82,9 @@ func Open(configPath, tokenPath string, opt Options) (*Core, error) {
 		cfg: cfg, insts: map[string]*Instance{}, dirty: map[string]bool{},
 		newSupervisor: opt.Supervisor,
 		updates:       make(chan Update), wake: make(chan struct{}, 1),
-		runCtx: context.Background(),
 	}
 	for _, in := range cfg.Instances {
-		c.newInstance(in)
+		c.register(c.newInstance(in))
 	}
 	return c, nil
 }
@@ -129,10 +128,17 @@ func (c *Core) Snapshot() map[string]state.Instance {
 // Run connects every instance and keeps them connected until ctx ends. It
 // returns immediately; the work happens in goroutines.
 func (c *Core) Run(ctx context.Context) {
+	// Setting the context and taking the instances happen together, so an
+	// Add racing this either lands in the list Run starts or sees the
+	// context and starts itself — never both.
 	c.mu.Lock()
 	c.runCtx = ctx
+	insts := make([]*Instance, 0, len(c.order))
+	for _, name := range c.order {
+		insts = append(insts, c.insts[name])
+	}
 	c.mu.Unlock()
-	for _, in := range c.Instances() {
+	for _, in := range insts {
 		go in.sup.Run(ctx)
 	}
 	go c.announce(ctx)
@@ -182,7 +188,7 @@ func (c *Core) changed(name string) {
 
 // Add appends an instance to the config file and starts watching it. The
 // config file keeps its comments and any entries Load skipped.
-func (c *Core) Add(ctx context.Context, in config.Instance) (*Instance, error) {
+func (c *Core) Add(in config.Instance) (*Instance, error) {
 	c.mu.Lock()
 	next := c.cfg
 	next.Instances = append([]config.Instance(nil), c.cfg.Instances...)
@@ -199,19 +205,16 @@ func (c *Core) Add(ctx context.Context, in config.Instance) (*Instance, error) {
 	c.mu.Unlock()
 
 	inst := c.newInstance(in)
-	go inst.sup.Run(c.context(ctx))
-	return inst, nil
-}
-
-// context is the context the instances run under: the one Run was given, so
-// an instance added later stops with the rest.
-func (c *Core) context(fallback context.Context) context.Context {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.runCtx != nil {
-		return c.runCtx
+	c.register(inst)
+	runCtx := c.runCtx
+	c.mu.Unlock()
+	if runCtx != nil {
+		// Already running: start it under Run's context, so it stops with
+		// the rest. Before Run, Run starts it along with the others.
+		go inst.sup.Run(runCtx)
 	}
-	return fallback
+	return inst, nil
 }
 
 // SetToken stores an instance's login token and wakes its connection.
@@ -229,11 +232,13 @@ func (c *Core) SetToken(name, url, token string) error {
 func (c *Core) newInstance(cfg config.Instance) *Instance {
 	in := &Instance{cfg: cfg, core: c}
 	in.sup = c.newSupervisor(cfg.URL, func() string { return c.tokens.Get(cfg.Name, cfg.URL) }, in.apply)
-	c.mu.Lock()
-	c.insts[cfg.Name] = in
-	c.order = append(c.order, cfg.Name)
-	c.mu.Unlock()
 	return in
+}
+
+// register adds an instance to the list. The caller holds c.mu.
+func (c *Core) register(in *Instance) {
+	c.insts[in.cfg.Name] = in
+	c.order = append(c.order, in.cfg.Name)
 }
 
 // Instance is one Kuma: its state, and the actions that change it.

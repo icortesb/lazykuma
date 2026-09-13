@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -200,13 +201,11 @@ func TestAddInstanceKeepsTheConfigAndStarts(t *testing.T) {
 	appendFile(t, cfgPath, extra)
 	runCore(t, c)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	vps := config.Instance{Name: "vps", URL: f2.URL()}
-	if _, err := c.Add(ctx, vps); err != nil {
+	if _, err := c.Add(vps); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Add(ctx, vps); err == nil {
+	if _, err := c.Add(vps); err == nil {
 		t.Fatal("the same name was accepted twice")
 	}
 
@@ -253,10 +252,10 @@ func appendFile(t *testing.T, path, s string) {
 
 // countingSupervisor stands in for a real connection, to prove the seam is
 // used wherever an instance starts.
-type countingSupervisor struct{ started, retries int }
+type countingSupervisor struct{ started atomic.Int32 }
 
-func (s *countingSupervisor) Run(ctx context.Context)         { s.started++; <-ctx.Done() }
-func (s *countingSupervisor) Retry()                          { s.retries++ }
+func (s *countingSupervisor) Run(ctx context.Context)         { s.started.Add(1); <-ctx.Done() }
+func (s *countingSupervisor) Retry()                          {}
 func (s *countingSupervisor) Session() (*kuma.Session, error) { return nil, kuma.ErrNotConnected }
 
 func TestAddUsesTheInjectedSupervisor(t *testing.T) {
@@ -280,7 +279,7 @@ func TestAddUsesTheInjectedSupervisor(t *testing.T) {
 
 	// An instance added while running must go through the same seam, or a
 	// test that injects one silently talks to the network.
-	if _, err := c.Add(ctx, config.Instance{Name: "vps", URL: "http://vps.lan"}); err != nil {
+	if _, err := c.Add(config.Instance{Name: "vps", URL: "http://vps.lan"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(made) != 1 || made["http://vps.lan"] == nil {
@@ -310,5 +309,32 @@ func TestSilenceWindowIsSentInUTC(t *testing.T) {
 	}
 	if f.Sent(`"Local"`) {
 		t.Fatal(`sent Go's "Local" zone name, which Kuma rejects`)
+	}
+}
+
+func TestAddBeforeRunStartsOnce(t *testing.T) {
+	dir := t.TempDir()
+	var sup countingSupervisor
+	c, err := Open(filepath.Join(dir, "config.toml"), filepath.Join(dir, "tokens.json"), Options{
+		Supervisor: func(string, func() string, func(kuma.Event)) Supervisor { return &sup },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Added before Run: Run must start it, and only Run.
+	if _, err := c.Add(config.Instance{Name: "vps", URL: "http://vps.lan"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Run(ctx)
+
+	deadline := time.Now().Add(time.Second)
+	for sup.started.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // room for a second start, if there were one
+	if n := sup.started.Load(); n != 1 {
+		t.Fatalf("started %d times, want once", n)
 	}
 }

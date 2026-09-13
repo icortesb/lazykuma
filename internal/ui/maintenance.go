@@ -76,6 +76,20 @@ func (s silenceForm) View() string {
 		"leave both times empty to silence it now, until you end it; otherwise 2026-09-12 15:04")
 }
 
+// localTime shows a window's end, which Kuma writes in the window's own
+// timezone, in the machine's: that is how the silence form asked for it.
+func localTime(kumaTime, zone string) string {
+	loc, err := time.LoadLocation(zone)
+	if err != nil || zone == "" {
+		return kumaTime // an unknown zone: show what Kuma said, as it said it
+	}
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", kumaTime, loc)
+	if err != nil {
+		return kumaTime
+	}
+	return t.Local().Format(silenceLayout)
+}
+
 // maintenanceScreen lists an instance's maintenance windows.
 type maintenanceScreen struct {
 	cursor int
@@ -146,7 +160,7 @@ func (s maintenanceScreen) View(name string, windows []kuma.Maintenance, width, 
 	for i, m := range windows {
 		when := "until ended"
 		if m.Strategy == "single" {
-			when = m.Start + " → " + m.End
+			when = localTime(m.Start, m.Timezone) + " → " + localTime(m.End, m.Timezone)
 		}
 		line := fmt.Sprintf("%-24s %-13s %s", truncate(m.Title, 24), m.Status, when)
 		if i == cursor {

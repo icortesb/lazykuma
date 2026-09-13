@@ -116,3 +116,20 @@ func TestMaintenanceScreen(t *testing.T) {
 		t.Error("the empty list does not say what to do")
 	}
 }
+
+func TestSilencedWindowShowsLocalTime(t *testing.T) {
+	// Kuma returns a window in its own timezone; the list shows it in the
+	// machine's, the way the silence form asked for it.
+	utc := time.Date(2026, 9, 12, 18, 0, 0, 0, time.UTC)
+	want := utc.Local().Format(silenceLayout)
+	if got := localTime("2026-09-12 18:00:00", "UTC"); got != want {
+		t.Fatalf("localTime = %q, want %q", got, want)
+	}
+	// A zone Go does not know, or none: show what Kuma said rather than guess.
+	if got := localTime("2026-09-12 18:00:00", "Mars/Olympus"); got != "2026-09-12 18:00:00" {
+		t.Errorf("unknown zone = %q", got)
+	}
+	if got := localTime("2026-09-12 18:00:00", ""); got != "2026-09-12 18:00:00" {
+		t.Errorf("no zone = %q", got)
+	}
+}

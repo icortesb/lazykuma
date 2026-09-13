@@ -253,7 +253,7 @@ func loadMonitor(in *core.Instance, id int, toRaw bool) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		mon, err := in.GetMonitor(ctx, id)
-		return monitorLoaded{mon: mon, toRaw: toRaw, err: err}
+		return monitorLoaded{instance: in.Name(), mon: mon, toRaw: toRaw, err: err}
 	}
 }
 

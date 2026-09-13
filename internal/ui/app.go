@@ -134,9 +134,10 @@ type (
 	// monitorLoaded carries the whole monitor Kuma returned, for the form
 	// or the field editor.
 	monitorLoaded struct {
-		mon   kuma.RawMonitor
-		toRaw bool
-		err   error
+		instance string // which instance asked: the user can move on
+		mon      kuma.RawMonitor
+		toRaw    bool
+		err      error
 	}
 	flashMsg      struct{ text string }
 	clearFlashMsg struct{ text string }
@@ -188,8 +189,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
 		}
-		if m.screen != screenInstance {
-			// The user moved on while Kuma was answering.
+		if m.screen != screenInstance || m.current().name() != msg.instance {
+			// The user moved on while Kuma was answering; an edit opened now
+			// would save one instance's monitor into another.
 			return m, nil
 		}
 		if msg.toRaw {
@@ -438,7 +440,7 @@ func (m Model) updateAdd(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenMenu
 	case formSubmit:
 		cfg := m.add.Values()
-		added, err := m.deps.Core.Add(context.Background(), cfg)
+		added, err := m.deps.Core.Add(cfg)
 		if err != nil {
 			m.add = m.add.WithError(err)
 			return m, nil

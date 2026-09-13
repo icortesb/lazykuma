@@ -182,6 +182,26 @@ func TestIntegrationRealKuma(t *testing.T) {
 	if err := w.DeleteMaintenance(ctx, mid); err != nil {
 		t.Fatalf("DeleteMaintenance: %v", err)
 	}
+
+	// A window between two times, the way core.Silence sends it: in UTC,
+	// because Go's name for an unset TZ is "Local" and Kuma rejects that.
+	start := time.Now().UTC().Add(time.Hour).Truncate(time.Minute)
+	wid, err := w.AddMaintenance(ctx, map[string]any{
+		"title": "lazykuma window", "description": "", "strategy": "single", "active": true,
+		"intervalDay": 1,
+		"dateRange":   []any{start.Format("2006-01-02 15:04:05"), start.Add(time.Hour).Format("2006-01-02 15:04:05")},
+		"timeRange":   []any{map[string]any{"hours": 0, "minutes": 0}, map[string]any{"hours": 0, "minutes": 0}},
+		"weekdays":    []any{}, "daysOfMonth": []any{}, "timezoneOption": "UTC",
+	})
+	if err != nil {
+		t.Fatalf("AddMaintenance(single, UTC): %v", err)
+	}
+	if err := w.SetMaintenanceMonitors(ctx, wid, []int{id}); err != nil {
+		t.Fatalf("SetMaintenanceMonitors(window): %v", err)
+	}
+	if err := w.DeleteMaintenance(ctx, wid); err != nil {
+		t.Fatalf("DeleteMaintenance(window): %v", err)
+	}
 	if err := w.DeleteMonitor(ctx, id); err != nil {
 		t.Fatalf("DeleteMonitor: %v", err)
 	}
