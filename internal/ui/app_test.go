@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +73,7 @@ func newHarness(t *testing.T, loggedIn []string, names ...string) *harness {
 	c.Run(ctx)
 
 	h.m = New(Deps{
-		Core: c, Version: "0.0.0-test", Now: func() time.Time { return tBase },
+		Core: c, Version: "0.0.0-test",
 		Login: func(_ context.Context, url, user, pass, code string) (string, error) {
 			return h.login(url, user, pass, code)
 		},
@@ -319,6 +320,11 @@ func TestAddInstanceRejectsDuplicate(t *testing.T) {
 	if !strings.Contains(h.view(), `already an instance called "home"`) {
 		t.Fatalf("view:\n%s", h.view())
 	}
+	// The rejected instance must not reach the config file either.
+	saved, _ := os.ReadFile(h.cfgPath)
+	if strings.Count(string(saved), "[[instance]]") != 1 {
+		t.Fatalf("config file = %s", saved)
+	}
 }
 
 func TestHelpAndQuit(t *testing.T) {
@@ -355,4 +361,43 @@ func TestMenuFitsNarrowTerminal(t *testing.T) {
 	h := newHarness(t, []string{"home"}, "home", "vps")
 	h.send(tea.WindowSizeMsg{Width: 60, Height: 24})
 	assertFits(t, h.view(), 60)
+}
+
+func TestHelpListsTheInstanceKeys(t *testing.T) {
+	h := newHarness(t, nil, "home")
+	h.press("?")
+	v := h.view()
+	// The help is built from the same line the instance screen shows, so
+	// the two cannot drift apart.
+	for _, want := range []string{"n new", "d delete", "m silence", "c channels", "i incidents", "ctrl+s save", "never written here"} {
+		if !strings.Contains(v, want) {
+			t.Errorf("help lacks %q:\n%s", want, v)
+		}
+	}
+}
+
+func TestLongDialErrorFitsAndShowsCause(t *testing.T) {
+	// A real dial error to a closed port is ~180 characters; the menu must
+	// show the useful end of it and stay inside the terminal.
+	h := newHarness(t, nil, "home")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	_, dialErr := kuma.Dial(context.Background(), "http://"+addr)
+	if dialErr == nil {
+		t.Fatal("dial to a closed port succeeded")
+	}
+	h.state("home", state.Apply(state.Instance{}, kuma.Disconnected{Err: dialErr}, tBase))
+
+	for _, width := range []int{100, 60} {
+		h.send(tea.WindowSizeMsg{Width: width, Height: 30})
+		v := h.view()
+		if !strings.Contains(v, "connection refused") {
+			t.Errorf("at %d columns the cause is gone:\n%s", width, v)
+		}
+		assertFits(t, v, width)
+	}
 }

@@ -57,9 +57,12 @@ func TestCreateAMonitorThroughTheUI(t *testing.T) {
 	h.typeText("pihole")
 	h.press("tab")
 	h.typeText("https://pi.home.lan")
-	h.toChannels()                         // past interval, retries and accept
-	h.send(tea.KeyMsg{Type: tea.KeySpace}) // tick telegram
-	h.press("enter")                       // save
+	h.toChannels() // past interval, retries and accept
+	// The default channel comes ticked, as Kuma's own form does.
+	if !h.m.mform.channels[0].on {
+		t.Fatal("the default channel is not ticked")
+	}
+	h.press("enter") // save
 
 	f := h.fakes["home"]
 	if !f.Sent(`"name":"pihole"`) || !f.Sent(`"url":"https://pi.home.lan"`) {
@@ -74,6 +77,22 @@ func TestCreateAMonitorThroughTheUI(t *testing.T) {
 	// The form closes and the instance is back on screen.
 	if !strings.Contains(h.view(), "home · 2 monitors") {
 		t.Errorf("did not return to the instance:\n%s", h.view())
+	}
+}
+
+func TestUntickingAChannelSticks(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("n")
+	h.press("enter") // HTTP
+	h.typeText("no-alerts")
+	h.press("tab")
+	h.typeText("https://x.home.lan")
+	h.toChannels()
+	h.send(tea.KeyMsg{Type: tea.KeySpace}) // untick the default
+	h.press("enter")
+
+	if !h.fakes["home"].Sent(`"notificationIDList":{}`) {
+		t.Fatalf("channel not unticked: %v", h.fakes["home"].Frames())
 	}
 }
 
@@ -190,6 +209,10 @@ func TestSilencedListEndsAWindow(t *testing.T) {
 		t.Fatalf("no silenced list:\n%s", h.view())
 	}
 	h.press("d")
+	if !strings.Contains(h.view(), "Delete the maintenance") {
+		t.Fatalf("no confirmation:\n%s", h.view())
+	}
+	h.press("y")
 	if !h.fakes["home"].Sent(`["deleteMaintenance",6]`) {
 		t.Fatalf("not ended: %v", h.fakes["home"].Frames())
 	}

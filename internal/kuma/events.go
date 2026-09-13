@@ -466,9 +466,11 @@ func decodeNotificationList(a json.RawMessage) (NotificationList, error) {
 	for _, r := range raw {
 		n := Notification{ID: r.ID, Name: r.Name, Active: bool(r.Active), IsDefault: bool(r.IsDefault)}
 		// config is a JSON document inside a JSON string, and the provider
-		// name lives in it rather than in a column.
+		// name lives in it rather than in a column. One unreadable channel
+		// is skipped: dropping the whole list would leave the UI believing
+		// the instance has no channels, and an edit would then unlink them.
 		if err := json.Unmarshal([]byte(r.Config), &n.Config); err != nil {
-			return NotificationList{}, fmt.Errorf("notification %d config: %w", r.ID, err)
+			continue
 		}
 		if t, ok := n.Config["type"].(string); ok {
 			n.Type = t

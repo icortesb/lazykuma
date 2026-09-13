@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/icortesb/lazykuma/internal/kuma"
+	"github.com/icortesb/lazykuma/internal/state"
 )
 
 func typeInSilence(s silenceForm, text string) silenceForm {
@@ -18,7 +19,7 @@ func typeInSilence(s silenceForm, text string) silenceForm {
 }
 
 func TestSilenceNowUntilEnded(t *testing.T) {
-	s := newSilenceForm("nextcloud")
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}})
 	title, start, end, err := s.Values()
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +34,7 @@ func TestSilenceNowUntilEnded(t *testing.T) {
 }
 
 func TestSilenceWindow(t *testing.T) {
-	s := newSilenceForm("nextcloud")
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}})
 	s, _, _ = s.Update(keyMsg("tab"))
 	s = typeInSilence(s, "2026-09-12 15:00")
 	s, _, _ = s.Update(keyMsg("tab"))
@@ -62,7 +63,7 @@ func TestSilenceFormRejectsBadWindows(t *testing.T) {
 		{"2026-09-12 17:00", "2026-09-12 15:00", "ends before it starts"},
 	}
 	for _, tt := range tests {
-		s := newSilenceForm("web")
+		s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}})
 		s, _, _ = s.Update(keyMsg("tab"))
 		s = typeInSilence(s, tt.from)
 		s, _, _ = s.Update(keyMsg("tab"))
@@ -72,7 +73,7 @@ func TestSilenceFormRejectsBadWindows(t *testing.T) {
 		}
 	}
 
-	s := newSilenceForm("web")
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}})
 	s.fields[0].SetValue("")
 	if _, _, _, err := s.Values(); err == nil || !strings.Contains(err.Error(), "title is empty") {
 		t.Errorf("empty title = %v", err)
@@ -92,7 +93,7 @@ func TestMaintenanceScreen(t *testing.T) {
 
 	s := maintenanceScreen{}
 	out := ansi.Strip(s.View("home", sorted, 80, 24))
-	for _, want := range []string{"home · silenced", "deploy", "under-maintenance", "until ended", "2026-09-13 02:00 → 2026-09-13 04:00", "d end it"} {
+	for _, want := range []string{"home · silenced", "deploy", "under-maintenance", "until ended", "2026-09-13 02:00 → 2026-09-13 04:00", "d delete it"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("view lacks %q:\n%s", want, out)
 		}

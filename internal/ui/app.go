@@ -25,7 +25,6 @@ type Deps struct {
 	Login func(ctx context.Context, url, username, password, code string) (string, error)
 
 	Version string
-	Now     func() time.Time // time.Now when nil
 }
 
 // InstanceState is one instance's state, sent in by main with
@@ -101,9 +100,6 @@ const noInstances = "no instances yet: add one"
 
 // New opens on the menu, showing the instances the core holds.
 func New(d Deps) Model {
-	if d.Now == nil {
-		d.Now = time.Now
-	}
 	m := Model{deps: d, inst: newInstanceScreen(), width: 80, height: 24}
 	for _, in := range d.Core.Instances() {
 		m.insts = append(m.insts, instance{inst: in, st: in.State()})
@@ -192,19 +188,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
 		}
+		if m.screen != screenInstance {
+			// The user moved on while Kuma was answering.
+			return m, nil
+		}
 		if msg.toRaw {
-			m.raw = newRawEditor("monitor", msg.mon)
+			m.raw = newRawEditor("monitor", 0, msg.mon)
 			m.backTo, m.screen = screenInstance, screenRaw
 			return m, nil
 		}
 		kind, _ := msg.mon["type"].(string)
 		if !isCuratedKind(kind) {
 			// No form knows this type's fields; its own values do.
-			m.raw = newRawEditor("monitor", msg.mon)
+			m.raw = newRawEditor("monitor", 0, msg.mon)
 			m.backTo, m.screen = screenInstance, screenRaw
 			return m, nil
 		}
-		m.mform = editMonitorForm(msg.mon, m.channelToggles())
+		m.mform = editMonitorForm(msg.mon, m.channelToggles(false))
 		m.backTo, m.screen = screenInstance, screenMonitor
 		return m, nil
 
@@ -364,7 +364,7 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case instSilence:
 		if mon, ok := m.inst.selected(in.st); ok {
-			m.silence = newSilenceForm(mon.Name)
+			m.silence = newSilenceForm(mon)
 			m.backTo, m.screen = screenInstance, screenSilence
 		}
 	case instSilenced:
@@ -533,23 +533,37 @@ func (m Model) chrome(body, hint string) string {
 }
 
 func helpText() string {
-	rows := [][2]string{
-		{"↑/k ↓/j", "move"},
-		{"enter", "open the instance, or log in to it"},
-		{"p", "pause or resume the selected monitor"},
-		{"/", "filter monitors by name or target; esc clears it"},
-		{"esc", "back"},
-		{"q", "quit, from the menu"},
-		{"ctrl+c", "quit, from anywhere"},
-	}
+	// The instance keys come from the same line the instance screen shows,
+	// so the two cannot drift apart.
 	var b strings.Builder
 	b.WriteString(styleHeading.Render("Keys") + "\n\n")
-	for _, r := range rows {
+	for _, r := range [][2]string{
+		{"↑/k ↓/j", "move"},
+		{"enter", "open an instance, or log in to it"},
+		{"esc", "back"},
+		{"?", "help"},
+		{"q", "quit, from the menu"},
+		{"ctrl+c", "quit, from anywhere"},
+	} {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", styleKey.Render(fmt.Sprintf("%-8s", r[0])), styleValue.Render(r[1])))
 	}
+	b.WriteString("\n" + styleHeading.Render("On an instance") + "\n\n")
+	for _, part := range strings.Split(keyHints, "   ") {
+		if part = strings.TrimSpace(part); part != "" {
+			b.WriteString("  " + styleValue.Render(part) + "\n")
+		}
+	}
+	b.WriteString("\n" + styleHeading.Render("In the field editor") + "\n\n")
+	b.WriteString("  " + styleValue.Render("enter edit   a add field   d delete   ctrl+s save") + "\n")
 	b.WriteString("\n" + styleHeading.Render("What lazykuma stores") + "\n\n")
-	b.WriteString(styleValue.Render("  The instances, in ~/.config/lazykuma/config.toml: safe to keep in dotfiles.\n"))
-	b.WriteString(styleValue.Render("  The login tokens, in ~/.local/state/lazykuma/tokens.json, readable only by you.\n"))
-	b.WriteString(styleValue.Render("  Passwords and 2FA codes are sent to Kuma once and never written anywhere.\n"))
+	// Each line is styled on its own: a newline inside a styled block makes
+	// lipgloss pad the lines to one width and push the next ones sideways.
+	for _, line := range []string{
+		"The instances, in ~/.config/lazykuma/config.toml: safe to keep in dotfiles.",
+		"The login tokens, in ~/.local/state/lazykuma/tokens.json, readable only by you.",
+		"Passwords, 2FA codes and channel secrets go to Kuma and are never written here.",
+	} {
+		b.WriteString("  " + styleValue.Render(line) + "\n")
+	}
 	return b.String()
 }

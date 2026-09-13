@@ -108,13 +108,12 @@ func newMonitorForm(kind string, channels []channelToggle) monitorForm {
 	f, _ = f.focusOn(0)
 	m := monitorForm{form: f, kind: kind, defs: defs, channels: channels}
 	// Kuma's own defaults, so an empty field means what the web UI means.
-	m.fields[m.index("interval")].SetValue("60")
-	m.fields[m.index("maxretries")].SetValue("0")
-	if i := m.index("accepted_statuscodes"); i >= 0 {
-		m.fields[i].SetValue("200-299")
-	}
-	if i := m.index("invertKeyword"); i >= 0 {
-		m.fields[i].SetValue("no")
+	for key, value := range map[string]string{
+		"interval": "60", "maxretries": "0", "accepted_statuscodes": "200-299", "invertKeyword": "no",
+	} {
+		if i := m.index(key); i >= 0 {
+			m.fields[i].SetValue(value)
+		}
 	}
 	return m
 }
@@ -311,11 +310,24 @@ func (m monitorForm) Values() (kuma.RawMonitor, error) {
 		}
 	}
 
+	// Start from the monitor's own channels and only flip the ones this
+	// form showed: editMonitor replaces the monitor, so a channel the form
+	// never knew about must not be dropped from it.
 	ids := map[string]bool{}
-	for _, c := range m.channels {
-		if c.on {
-			ids[strconv.Itoa(c.id)] = true
+	if base, ok := m.base["notificationIDList"].(map[string]any); ok {
+		for id, v := range base {
+			if b, _ := v.(bool); b {
+				ids[id] = true
+			}
 		}
+	}
+	for _, c := range m.channels {
+		key := strconv.Itoa(c.id)
+		if c.on {
+			ids[key] = true
+			continue
+		}
+		delete(ids, key)
 	}
 	out["notificationIDList"] = ids
 	return out, nil

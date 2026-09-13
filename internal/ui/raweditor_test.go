@@ -31,7 +31,7 @@ func at(t *testing.T, e rawEditor, key string) rawEditor {
 }
 
 func TestRawEditorEditsAValue(t *testing.T) {
-	e := newRawEditor("monitor", rawSkeleton("dns"))
+	e := newRawEditor("monitor", 0, rawSkeleton("dns"))
 	e = at(t, e, "name")
 	e, _, _ = e.Update(keyMsg("enter"))
 	if !e.editing {
@@ -58,7 +58,7 @@ func TestRawEditorEditsAValue(t *testing.T) {
 }
 
 func TestRawEditorRefusesValuesThatAreNotJSON(t *testing.T) {
-	e := newRawEditor("monitor", rawSkeleton("dns"))
+	e := newRawEditor("monitor", 0, rawSkeleton("dns"))
 	e = at(t, e, "name")
 	e, _, _ = e.Update(keyMsg("enter"))
 	e.input.SetValue("dns check") // unquoted: not JSON
@@ -76,7 +76,7 @@ func TestRawEditorRefusesValuesThatAreNotJSON(t *testing.T) {
 }
 
 func TestRawEditorAddsAndRemovesFields(t *testing.T) {
-	e := newRawEditor("monitor", rawSkeleton("dns"))
+	e := newRawEditor("monitor", 0, rawSkeleton("dns"))
 	before := len(e.keys)
 
 	e, _, _ = e.Update(keyMsg("a"))
@@ -121,7 +121,7 @@ func TestRawEditorKeepsUnknownFieldsOfAnExistingMonitor(t *testing.T) {
 		"id": float64(4), "type": "dns", "name": "resolver", "interval": float64(60),
 		"dns_resolve_type": "A", "weight": float64(2000), "conditions": []any{},
 	}
-	e := newRawEditor("monitor", mon)
+	e := newRawEditor("monitor", 0, mon)
 	if e.id != 4 {
 		t.Fatalf("id = %d", e.id)
 	}
@@ -140,7 +140,7 @@ func TestRawEditorKeepsUnknownFieldsOfAnExistingMonitor(t *testing.T) {
 }
 
 func TestRawEditorNeedsANameAndAType(t *testing.T) {
-	e := newRawEditor("monitor", rawSkeleton("dns")) // name is empty
+	e := newRawEditor("monitor", 0, rawSkeleton("dns")) // name is empty
 	if _, err := e.Values(); err == nil || !strings.Contains(err.Error(), "name is empty") {
 		t.Fatalf("err = %v", err)
 	}
@@ -158,7 +158,7 @@ func TestRawEditorNeedsANameAndAType(t *testing.T) {
 }
 
 func TestRawEditorSavesAndCancels(t *testing.T) {
-	e := newRawEditor("monitor", rawSkeleton("dns"))
+	e := newRawEditor("monitor", 0, rawSkeleton("dns"))
 	if _, act, _ := e.Update(tea.KeyMsg{Type: tea.KeyCtrlS}); act != formSubmit {
 		t.Fatalf("ctrl+s = %v", act)
 	}

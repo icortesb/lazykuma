@@ -40,10 +40,14 @@ func rawSkeleton(kind string) kuma.RawMonitor {
 	}
 }
 
-func newRawEditor(what string, obj map[string]any) rawEditor {
-	e := rawEditor{what: what, vals: map[string]string{}, input: newField("value  ", "")}
-	if id, ok := numberOf(obj["id"]); ok {
-		e.id = id
+// newRawEditor edits obj. id is the object's own id, 0 when creating: a
+// monitor keeps its id among its fields, a channel does not.
+func newRawEditor(what string, id int, obj map[string]any) rawEditor {
+	e := rawEditor{what: what, id: id, vals: map[string]string{}, input: newField("value  ", "")}
+	if id == 0 {
+		if n, ok := numberOf(obj["id"]); ok {
+			e.id = n
+		}
 	}
 	for k, v := range obj {
 		b, err := json.Marshal(v)

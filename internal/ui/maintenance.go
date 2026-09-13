@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/icortesb/lazykuma/internal/kuma"
+	"github.com/icortesb/lazykuma/internal/state"
 )
 
 // silenceLayout is how a window's ends are typed: local time, to the minute.
@@ -19,18 +20,20 @@ const silenceLayout = "2006-01-02 15:04"
 // times.
 type silenceForm struct {
 	form
-	monitor string
+	// monitor is fixed when the form opens: the list under it can reorder
+	// while the window is being typed.
+	monitor state.Monitor
 }
 
-func newSilenceForm(monitorName string) silenceForm {
+func newSilenceForm(mon state.Monitor) silenceForm {
 	f := form{fields: []textinputModel{
 		newField("title  ", "deploy"),
 		newField("from   ", "now"),
 		newField("to     ", "until I end it"),
 	}, shown: 3}
 	f, _ = f.focusOn(0)
-	f.fields[0].SetValue("maintenance: " + monitorName)
-	return silenceForm{form: f, monitor: monitorName}
+	f.fields[0].SetValue("maintenance: " + mon.Name)
+	return silenceForm{form: f, monitor: mon}
 }
 
 func (s silenceForm) Update(msg tea.Msg) (silenceForm, formAction, tea.Cmd) {
@@ -69,7 +72,7 @@ func (s silenceForm) Values() (title string, start, end time.Time, err error) {
 }
 
 func (s silenceForm) View() string {
-	return s.view("Silence "+s.monitor,
+	return s.view("Silence "+s.monitor.Name,
 		"leave both times empty to silence it now, until you end it; otherwise 2026-09-12 15:04")
 }
 
@@ -157,6 +160,6 @@ func (s maintenanceScreen) View(name string, windows []kuma.Maintenance, width, 
 		b.WriteString(" " + style.Render(truncate(line, width-2)) + "\n")
 	}
 	b.WriteString("\n" + styleFooter.Render(
-		styleKey.Render("d")+" end it   "+styleKey.Render("esc")+" back"))
+		styleKey.Render("d")+" delete it   "+styleKey.Render("esc")+" back"))
 	return b.String()
 }

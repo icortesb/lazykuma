@@ -52,7 +52,9 @@ func run() error {
 		for {
 			select {
 			case u := <-c.Updates():
-				p.Send(ui.InstanceState{Name: u.Instance, State: u.State})
+				if in, ok := c.Instance(u.Instance); ok {
+					p.Send(ui.InstanceState{Name: u.Instance, State: in.State()})
+				}
 			case <-ctx.Done():
 				return
 			}

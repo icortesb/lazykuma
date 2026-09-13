@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/icortesb/lazykuma/internal/config"
+	"github.com/icortesb/lazykuma/internal/kuma"
 	"github.com/icortesb/lazykuma/internal/kumatest"
 	"github.com/icortesb/lazykuma/internal/state"
 )
@@ -94,20 +95,19 @@ func TestCoreConnectsAndPublishes(t *testing.T) {
 	c, _ := open(t, func(string) string { return "jwt" }, config.Instance{Name: "home", URL: f.URL()})
 	runCore(t, c)
 
-	// The update channel carries full snapshots.
-	var got Update
+	// An update names the instance; the state comes from the instance, so a
+	// reader that falls behind still sees the latest.
 	deadline := time.After(3 * time.Second)
-	for {
+	connected := false
+	for !connected {
 		select {
 		case u := <-c.Updates():
-			if u.Instance == "home" && u.State.Conn == state.ConnOK {
-				got = u
+			in, ok := c.Instance(u.Instance)
+			if ok && u.Instance == "home" && in.State().Conn == state.ConnOK {
+				connected = true
 			}
 		case <-deadline:
 			t.Fatal("no connected update")
-		}
-		if got.Instance != "" {
-			break
 		}
 	}
 	if c.Snapshot()["home"].Conn != state.ConnOK {
@@ -187,7 +187,7 @@ func TestSilence(t *testing.T) {
 	if _, err := in.Silence(ctx, "none", nil, time.Time{}, time.Time{}); err == nil {
 		t.Fatal("maintenance without monitors accepted")
 	}
-	if err := in.EndMaintenance(ctx, 4); err != nil {
+	if err := in.DeleteMaintenance(ctx, 4); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -248,5 +248,67 @@ func appendFile(t *testing.T, path, s string) {
 	defer f.Close()
 	if _, err := f.WriteString(s); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// countingSupervisor stands in for a real connection, to prove the seam is
+// used wherever an instance starts.
+type countingSupervisor struct{ started, retries int }
+
+func (s *countingSupervisor) Run(ctx context.Context)         { s.started++; <-ctx.Done() }
+func (s *countingSupervisor) Retry()                          { s.retries++ }
+func (s *countingSupervisor) Session() (*kuma.Session, error) { return nil, kuma.ErrNotConnected }
+
+func TestAddUsesTheInjectedSupervisor(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	made := map[string]*countingSupervisor{}
+	c, err := Open(cfgPath, filepath.Join(dir, "tokens.json"), Options{
+		Now: func() time.Time { return t0 },
+		Supervisor: func(url string, _ func() string, _ func(kuma.Event)) Supervisor {
+			s := &countingSupervisor{}
+			made[url] = s
+			return s
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.Run(ctx)
+
+	// An instance added while running must go through the same seam, or a
+	// test that injects one silently talks to the network.
+	if _, err := c.Add(ctx, config.Instance{Name: "vps", URL: "http://vps.lan"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(made) != 1 || made["http://vps.lan"] == nil {
+		t.Fatalf("supervisors made = %v", made)
+	}
+}
+
+func TestSilenceWindowIsSentInUTC(t *testing.T) {
+	f := kumaFake(t)
+	c, _ := open(t, func(string) string { return "jwt" }, config.Instance{Name: "home", URL: f.URL()})
+	runCore(t, c)
+	waitFor(t, c, "home", "connected", func(s state.Instance) bool { return s.Conn == state.ConnOK })
+	in, _ := c.Instance("home")
+
+	// Go names an unset TZ "Local", which Kuma rejects, so the window goes
+	// over the wire in UTC.
+	local := time.Date(2026, 9, 12, 10, 0, 0, 0, time.Local)
+	if _, err := in.Silence(context.Background(), "migration", []int{1}, local, local.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Sent(`"timezoneOption":"UTC"`) {
+		t.Fatalf("timezone not UTC: %v", f.Frames())
+	}
+	want := local.UTC().Format("2006-01-02 15:04:05")
+	if !f.Sent(`"` + want + `"`) {
+		t.Fatalf("window not in UTC (%s): %v", want, f.Frames())
+	}
+	if f.Sent(`"Local"`) {
+		t.Fatal(`sent Go's "Local" zone name, which Kuma rejects`)
 	}
 }

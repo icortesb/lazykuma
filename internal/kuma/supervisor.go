@@ -180,24 +180,6 @@ func (s *Supervisor) session() *Session {
 	return s.sess
 }
 
-// Pause stops a monitor on the instance; ErrNotConnected while it is offline.
-func (s *Supervisor) Pause(ctx context.Context, id int) error {
-	sess := s.session()
-	if sess == nil {
-		return ErrNotConnected
-	}
-	return sess.Pause(ctx, id)
-}
-
-// Resume starts a paused monitor again; ErrNotConnected while offline.
-func (s *Supervisor) Resume(ctx context.Context, id int) error {
-	sess := s.session()
-	if sess == nil {
-		return ErrNotConnected
-	}
-	return sess.Resume(ctx, id)
-}
-
 // Session is the live connection, for the calls the Supervisor does not
 // wrap itself. It is ErrNotConnected while the instance is offline.
 func (s *Supervisor) Session() (*Session, error) {

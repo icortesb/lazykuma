@@ -63,6 +63,18 @@ func fieldsForService(svc string) []field {
 	return nil
 }
 
+// isSecretField reports whether a field carries a credential, which is
+// then typed masked: a bot token is as good as a password.
+func isSecretField(key string) bool {
+	k := strings.ToLower(key)
+	for _, needle := range []string{"password", "token", "secret", "apikey", "api_key"} {
+		if strings.Contains(k, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // channelForm creates or edits one notification channel.
 type channelForm struct {
 	form
@@ -77,7 +89,7 @@ func newChannelForm(svc string) channelForm {
 	inputs := make([]textinputModel, 0, len(defs))
 	for _, d := range defs {
 		in := newField(d.prompt, d.placeholder)
-		if d.key == "smtpPassword" {
+		if isSecretField(d.key) {
 			in.EchoMode = echoPassword
 			in.EchoCharacter = '•'
 		}
@@ -155,8 +167,11 @@ func (c channelForm) Values() (map[string]any, error) {
 				return nil, fmt.Errorf("%q is not a port between 1 and 65535", v)
 			}
 			out[d.key] = n
-		case "smtpPassword":
+		case "smtpPassword", "telegramBotToken":
 			// Typed masked, sent to Kuma, never written to our own files.
+			if c.fields[i].Value() == "" {
+				return nil, fmt.Errorf("%s is empty", strings.TrimSpace(d.prompt))
+			}
 			out[d.key] = c.fields[i].Value()
 		default:
 			if v == "" {

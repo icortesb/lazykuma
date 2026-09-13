@@ -14,10 +14,11 @@ import (
 	"github.com/icortesb/lazykuma/internal/state"
 )
 
-// Update is one instance's state after something changed.
+// Update names an instance whose state changed. It carries no state on
+// purpose: the reader asks the instance, so a reader that falls behind sees
+// the latest state rather than a queue of stale ones.
 type Update struct {
 	Instance string
-	State    state.Instance
 }
 
 // Core owns the instances and their state.
@@ -31,8 +32,14 @@ type Core struct {
 	cfg   config.Config
 	insts map[string]*Instance
 	order []string
+	// dirty are the instances whose change has not been announced yet, so
+	// a burst of events becomes one wake-up per instance.
+	dirty map[string]bool
 
-	updates chan Update
+	newSupervisor func(url string, token func() string, out func(kuma.Event)) Supervisor
+	updates       chan Update
+	wake          chan struct{}
+	runCtx        context.Context
 }
 
 // Options are Core's seams, all optional.
@@ -72,10 +79,13 @@ func Open(configPath, tokenPath string, opt Options) (*Core, error) {
 	}
 	c := &Core{
 		cfgPath: configPath, tokens: tokens, warnings: warnings, now: opt.Now,
-		cfg: cfg, insts: map[string]*Instance{}, updates: make(chan Update, 256),
+		cfg: cfg, insts: map[string]*Instance{}, dirty: map[string]bool{},
+		newSupervisor: opt.Supervisor,
+		updates:       make(chan Update), wake: make(chan struct{}, 1),
+		runCtx: context.Background(),
 	}
 	for _, in := range cfg.Instances {
-		c.newInstance(in, opt)
+		c.newInstance(in)
 	}
 	return c, nil
 }
@@ -83,9 +93,9 @@ func Open(configPath, tokenPath string, opt Options) (*Core, error) {
 // Warnings are the config lines Load skipped.
 func (c *Core) Warnings() []string { return c.warnings }
 
-// Updates carries a full state snapshot each time an instance changes. A
-// slow reader loses intermediate snapshots, never the latest state, which
-// Snapshot always answers.
+// Updates names an instance each time its state changes. Changes coalesce
+// while a reader is busy, so it never falls behind; ask the instance for
+// the state itself.
 func (c *Core) Updates() <-chan Update { return c.updates }
 
 // Instances are the configured instances, in config order.
@@ -119,8 +129,54 @@ func (c *Core) Snapshot() map[string]state.Instance {
 // Run connects every instance and keeps them connected until ctx ends. It
 // returns immediately; the work happens in goroutines.
 func (c *Core) Run(ctx context.Context) {
+	c.mu.Lock()
+	c.runCtx = ctx
+	c.mu.Unlock()
 	for _, in := range c.Instances() {
 		go in.sup.Run(ctx)
+	}
+	go c.announce(ctx)
+}
+
+// announce turns the instances marked dirty into updates, one per instance,
+// however many changes piled up while the reader was busy.
+func (c *Core) announce(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.wake:
+		}
+		for _, name := range c.takeDirty() {
+			select {
+			case c.updates <- Update{Instance: name}:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}
+}
+
+// takeDirty is the instances that changed since the last call.
+func (c *Core) takeDirty() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.dirty))
+	for name := range c.dirty {
+		out = append(out, name)
+		delete(c.dirty, name)
+	}
+	return out
+}
+
+// changed marks an instance as worth announcing.
+func (c *Core) changed(name string) {
+	c.mu.Lock()
+	c.dirty[name] = true
+	c.mu.Unlock()
+	select {
+	case c.wake <- struct{}{}:
+	default: // a wake-up is already pending; it will take this one too
 	}
 }
 
@@ -142,9 +198,20 @@ func (c *Core) Add(ctx context.Context, in config.Instance) (*Instance, error) {
 	c.cfg = next
 	c.mu.Unlock()
 
-	inst := c.newInstance(in, Options{Now: c.now, Supervisor: c.supervisorFor})
-	go inst.sup.Run(ctx)
+	inst := c.newInstance(in)
+	go inst.sup.Run(c.context(ctx))
 	return inst, nil
+}
+
+// context is the context the instances run under: the one Run was given, so
+// an instance added later stops with the rest.
+func (c *Core) context(fallback context.Context) context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.runCtx != nil {
+		return c.runCtx
+	}
+	return fallback
 }
 
 // SetToken stores an instance's login token and wakes its connection.
@@ -153,22 +220,15 @@ func (c *Core) SetToken(name, url, token string) error {
 		return err
 	}
 	if in, ok := c.Instance(name); ok {
-		in.publish(state.Apply(in.State(), kuma.Connecting{}, c.now()))
+		in.apply(kuma.Connecting{})
 		in.sup.Retry()
 	}
 	return nil
 }
 
-func (c *Core) supervisorFor(url string, token func() string, out func(kuma.Event)) Supervisor {
-	return kuma.NewSupervisor(url, token, out)
-}
-
-func (c *Core) newInstance(cfg config.Instance, opt Options) *Instance {
-	if opt.Supervisor == nil {
-		opt.Supervisor = c.supervisorFor
-	}
+func (c *Core) newInstance(cfg config.Instance) *Instance {
 	in := &Instance{cfg: cfg, core: c}
-	in.sup = opt.Supervisor(cfg.URL, func() string { return c.tokens.Get(cfg.Name, cfg.URL) }, in.handle)
+	in.sup = c.newSupervisor(cfg.URL, func() string { return c.tokens.Get(cfg.Name, cfg.URL) }, in.apply)
 	c.mu.Lock()
 	c.insts[cfg.Name] = in
 	c.order = append(c.order, cfg.Name)
@@ -204,22 +264,14 @@ func (i *Instance) State() state.Instance {
 // backoff short.
 func (i *Instance) Retry() { i.sup.Retry() }
 
-func (i *Instance) handle(ev kuma.Event) {
+// apply folds one event into the instance's state. It is the only writer,
+// so a fold can never be built on a snapshot another goroutine has already
+// replaced.
+func (i *Instance) apply(ev kuma.Event) {
 	i.mu.Lock()
 	i.st = state.Apply(i.st, ev, i.core.now())
-	next := i.st
 	i.mu.Unlock()
-	i.publish(next)
-}
-
-func (i *Instance) publish(st state.Instance) {
-	i.mu.Lock()
-	i.st = st
-	i.mu.Unlock()
-	select {
-	case i.core.updates <- Update{Instance: i.cfg.Name, State: st}:
-	default: // a slow reader misses this snapshot, not the state
-	}
+	i.core.changed(i.cfg.Name)
 }
 
 // session is the live connection, or ErrNotConnected.
@@ -329,22 +381,27 @@ func (i *Instance) Silence(ctx context.Context, title string, monitorIDs []int, 
 		if !end.After(start) {
 			return 0, fmt.Errorf("lazykuma: the window ends before it starts")
 		}
+		// In UTC on purpose: Go names an unset TZ "Local", which Kuma feeds
+		// to dayjs and rejects. The times themselves are absolute either way.
 		m["strategy"] = "single"
-		m["dateRange"] = []any{kumaTime(start), kumaTime(end)}
-		m["timezoneOption"] = start.Location().String()
+		m["dateRange"] = []any{kumaTime(start.UTC()), kumaTime(end.UTC())}
+		m["timezoneOption"] = "UTC"
 	}
 	id, err := s.AddMaintenance(ctx, m)
 	if err != nil {
 		return 0, err
 	}
 	if err := s.SetMaintenanceMonitors(ctx, id, monitorIDs); err != nil {
-		return id, err
+		// A window covering nothing would sit in the list forever.
+		_ = s.DeleteMaintenance(ctx, id)
+		return 0, err
 	}
 	return id, nil
 }
 
-// EndMaintenance removes a maintenance window, so its monitors speak again.
-func (i *Instance) EndMaintenance(ctx context.Context, id int) error {
+// DeleteMaintenance removes a maintenance window for good, so its monitors
+// speak again.
+func (i *Instance) DeleteMaintenance(ctx context.Context, id int) error {
 	s, err := i.session()
 	if err != nil {
 		return err

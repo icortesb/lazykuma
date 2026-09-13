@@ -126,7 +126,11 @@ func TestSupervisorForwardsEventsAndActions(t *testing.T) {
 	f.Push(`42["avgPing","1",62]`)
 	eventually(t, "AvgPing", func() bool { return rec.has("kuma.AvgPing") })
 
-	if err := s.Pause(context.Background(), 1); err != nil {
+	sess, err := s.Session()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Pause(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
 	if !f.Called("pauseMonitor") {
@@ -171,7 +175,7 @@ func TestSupervisorRefusesKumaV1(t *testing.T) {
 
 func TestSupervisorActionsOffline(t *testing.T) {
 	s := NewSupervisor("http://127.0.0.1:1", func() string { return "" }, func(Event) {})
-	if err := s.Pause(context.Background(), 1); !errors.Is(err, ErrNotConnected) {
+	if _, err := s.Session(); !errors.Is(err, ErrNotConnected) {
 		t.Fatalf("err = %v", err)
 	}
 }

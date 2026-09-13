@@ -19,13 +19,18 @@ const actionTimeout = 45 * time.Second
 // current is the instance the screens are working on.
 func (m Model) current() instance { return m.insts[m.cur] }
 
-// channelToggles is the instance's channels, with the ones this monitor
-// already notifies through ticked.
-func (m Model) channelToggles() []channelToggle {
+// channelToggles is the instance's channels. A new monitor starts with the
+// default ones ticked, which is what Kuma's own form does and what the ★ in
+// the channels list promises; an edit has its own ticked by the caller.
+func (m Model) newChannelToggles() []channelToggle {
+	return m.channelToggles(true)
+}
+
+func (m Model) channelToggles(tickDefaults bool) []channelToggle {
 	st := m.current().st
 	out := make([]channelToggle, 0, len(st.Channels))
 	for _, c := range st.Channels {
-		out = append(out, channelToggle{id: c.ID, name: c.Name})
+		out = append(out, channelToggle{id: c.ID, name: c.Name, on: tickDefaults && c.IsDefault})
 	}
 	return out
 }
@@ -35,6 +40,11 @@ func (m Model) channelToggles() []channelToggle {
 func (m Model) openMonitorForm(kind string) (Model, tea.Cmd) {
 	if kind == "other" {
 		types := m.current().st.Types
+		if len(types) == 0 {
+			// The server has not said which types it supports yet; the ones
+			// every Kuma 2 implements are still worth offering.
+			types = kuma.ClassicTypes
+		}
 		options := make([]option, 0, len(types))
 		for _, t := range types {
 			options = append(options, option{t, t})
@@ -43,7 +53,7 @@ func (m Model) openMonitorForm(kind string) (Model, tea.Cmd) {
 		m.picking, m.screen = "rawtype", screenPick
 		return m, nil
 	}
-	m.mform = newMonitorForm(kind, m.channelToggles())
+	m.mform = newMonitorForm(kind, m.newChannelToggles())
 	m.backTo, m.screen = screenInstance, screenMonitor
 	return m, nil
 }
@@ -60,11 +70,11 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "monitor":
 			return m.openMonitorForm(value)
 		case "rawtype":
-			m.raw = newRawEditor("monitor", rawSkeleton(value))
+			m.raw = newRawEditor("monitor", 0, rawSkeleton(value))
 			m.backTo, m.screen = screenInstance, screenRaw
 		case "channel":
 			if value == "other" {
-				m.raw = newRawEditor("channel", map[string]any{"name": "", "type": "", "isDefault": false})
+				m.raw = newRawEditor("channel", 0, map[string]any{"name": "", "type": "", "isDefault": false})
 				m.backTo, m.screen = screenChannels, screenRaw
 				return m, nil
 			}
@@ -135,11 +145,11 @@ func (m Model) updateChannels(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.cform = editChannelForm(c)
 				m.backTo, m.screen = screenChannels, screenChannel
 			} else {
-				cfg := map[string]any{"id": c.ID}
+				cfg := map[string]any{}
 				for k, v := range c.Config {
 					cfg[k] = v
 				}
-				m.raw = newRawEditor("channel", cfg)
+				m.raw = newRawEditor("channel", c.ID, cfg)
 				m.backTo, m.screen = screenChannels, screenRaw
 			}
 		}
@@ -199,13 +209,9 @@ func (m Model) updateSilence(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.silence.err = err.Error()
 			return m, nil
 		}
-		in := m.current()
-		mon, ok := m.inst.selected(in.st)
-		if !ok {
-			m.screen = screenInstance
-			return m, nil
-		}
-		return m, silenceMonitor(in.inst, title, mon, start, end)
+		// The monitor was chosen when the form opened: the list can reorder
+		// underneath while the times are typed.
+		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, start, end)
 	}
 	return m, cmd
 }
@@ -220,7 +226,11 @@ func (m Model) updateSilenced(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.screen = screenInstance
 	case mtEnd:
 		if w, ok := m.silenced.selected(windows); ok {
-			return m, endSilence(in.inst, w)
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the maintenance %q?", w.Title),
+				detail:   "every monitor it covers speaks again, and the window is gone for good",
+			}
+			m.onYes, m.backTo, m.screen = endSilence(in.inst, w), screenSilenced, screenConfirm
 		}
 	}
 	return m, nil
@@ -317,6 +327,6 @@ func endSilence(in *core.Instance, w kuma.Maintenance) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		return actionDone{name: in.Name(), action: "ended", mon: w.Title, err: in.EndMaintenance(ctx, w.ID)}
+		return actionDone{name: in.Name(), action: "ended", mon: w.Title, err: in.DeleteMaintenance(ctx, w.ID)}
 	}
 }

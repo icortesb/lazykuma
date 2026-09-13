@@ -93,10 +93,14 @@ func TestIntegrationRealKuma(t *testing.T) {
 		}
 	}
 
-	if err := sup.Pause(ctx, monitorID); err != nil {
+	live, err := sup.Session()
+	if err != nil {
+		t.Fatalf("session: %v", err)
+	}
+	if err := live.Pause(ctx, monitorID); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	if err := sup.Resume(ctx, monitorID); err != nil {
+	if err := live.Resume(ctx, monitorID); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 

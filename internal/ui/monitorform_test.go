@@ -183,3 +183,46 @@ func TestKindLabels(t *testing.T) {
 		t.Errorf("an uncurated type keeps its name")
 	}
 }
+
+func TestEditNeverDropsChannelsTheFormCannotSee(t *testing.T) {
+	// The channel list can be empty — it arrives after the monitors, and a
+	// channel whose config Kuma cannot read is skipped — but editMonitor
+	// replaces the monitor, so an empty form must not unlink anything.
+	mon := kuma.RawMonitor{
+		"id": float64(3), "type": "http", "name": "vault", "url": "https://vault.lan",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{"5": true, "9": true},
+	}
+
+	// No channels known at all: both survive untouched.
+	out, err := editMonitorForm(mon, nil).Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := out["notificationIDList"].(map[string]bool)
+	if !ids["5"] || !ids["9"] || len(ids) != 2 {
+		t.Fatalf("channels lost with an empty list: %v", ids)
+	}
+
+	// One of the two known: the other is still not this form's to remove.
+	m := editMonitorForm(mon, []channelToggle{{id: 5, name: "telegram"}})
+	if !m.channels[0].on {
+		t.Fatal("the monitor's own channel is not ticked")
+	}
+	out, err = m.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = out["notificationIDList"].(map[string]bool)
+	if !ids["5"] || !ids["9"] {
+		t.Fatalf("channels = %v", ids)
+	}
+
+	// Unticking the one it shows removes that one, and only that one.
+	m.channels[0].on = false
+	out, _ = m.Values()
+	ids = out["notificationIDList"].(map[string]bool)
+	if ids["5"] || !ids["9"] {
+		t.Fatalf("unticking removed the wrong channel: %v", ids)
+	}
+}
