@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"testing"
 	"time"
 )
@@ -278,11 +277,19 @@ func TestBriefOfADialError(t *testing.T) {
 		t.Fatal("Dial to a closed port succeeded")
 	}
 	got := Brief(err)
-	if !strings.Contains(got, "connection refused") {
-		t.Fatalf("Brief(%v) = %q, want it to mention connection refused", err, got)
+	// The same words on every system: Windows says "actively refused it",
+	// at the very end of a long sentence a narrow terminal cuts off.
+	if got != "connection refused" {
+		t.Fatalf("Brief(%v) = %q, want %q", err, got, "connection refused")
 	}
-	if len(got) >= 60 {
-		t.Fatalf("Brief(%v) = %q is %d chars, want under 60", err, got, len(got))
+}
+
+func TestBriefOfWindowsRefusal(t *testing.T) {
+	// How Windows words it, as a wrapped error a dial returns there.
+	err := fmt.Errorf("kuma: failed to WebSocket dial: %w",
+		errors.New("dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it."))
+	if got := Brief(err); got != "connection refused" {
+		t.Fatalf("Brief = %q", got)
 	}
 }
 

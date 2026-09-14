@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -24,25 +25,68 @@ type Instance struct {
 	URL  string `toml:"url"`
 }
 
-// Config is the instances, in the order the menu lists them.
+// Notify is when lazykuma raises a desktop notification.
+type Notify struct {
+	// Desktop is whether the TUI notifies while it is open.
+	Desktop bool `toml:"desktop"`
+	// Watch is whether the watch command notifies.
+	Watch bool `toml:"watch"`
+	// On is "down" to notify only when something goes down, or "changes"
+	// to notify its recoveries too.
+	On string `toml:"on"`
+}
+
+// The values of Notify.On.
+const (
+	NotifyDown    = "down"
+	NotifyChanges = "changes"
+)
+
+// DefaultNotify is what a config without a [notify] section means: the
+// watch command raises the alerts. The terminal UI does not by default, or
+// running both would show every alert twice.
+func DefaultNotify() Notify {
+	return Notify{Desktop: false, Watch: true, On: NotifyDown}
+}
+
+// Config is the notification settings and the instances, in the order the
+// menu lists them.
 type Config struct {
+	Notify    Notify     `toml:"notify"`
 	Instances []Instance `toml:"instance"`
 }
 
-// Paths are the config and token files, under XDG_CONFIG_HOME and
-// XDG_STATE_HOME when set, ~/.config and ~/.local/state otherwise.
+// Paths are the config and token files: under XDG_CONFIG_HOME and
+// XDG_STATE_HOME when set; otherwise ~/.config and ~/.local/state on Linux
+// and macOS, and %AppData% and %LocalAppData% on Windows.
 func Paths() (configFile, tokenFile string, err error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", "", err
-	}
-	cfg := os.Getenv("XDG_CONFIG_HOME")
-	if cfg == "" {
-		cfg = filepath.Join(home, ".config")
-	}
-	st := os.Getenv("XDG_STATE_HOME")
-	if st == "" {
-		st = filepath.Join(home, ".local", "state")
+	return pathsFor(runtime.GOOS)
+}
+
+func pathsFor(goos string) (configFile, tokenFile string, err error) {
+	cfg, st := os.Getenv("XDG_CONFIG_HOME"), os.Getenv("XDG_STATE_HOME")
+	if goos == "windows" {
+		if cfg == "" {
+			if cfg = os.Getenv("AppData"); cfg == "" {
+				return "", "", errors.New("config: %AppData% is not set")
+			}
+		}
+		if st == "" {
+			if st = os.Getenv("LocalAppData"); st == "" {
+				st = cfg
+			}
+		}
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", err
+		}
+		if cfg == "" {
+			cfg = filepath.Join(home, ".config")
+		}
+		if st == "" {
+			st = filepath.Join(home, ".local", "state")
+		}
 	}
 	return filepath.Join(cfg, "lazykuma", "config.toml"), filepath.Join(st, "lazykuma", "tokens.json"), nil
 }
@@ -53,19 +97,36 @@ func Paths() (configFile, tokenFile string, err error) {
 func Load(path string) (Config, []string, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Config{}, nil, nil
+		return Config{Notify: DefaultNotify()}, nil, nil
 	}
 	if err != nil {
 		return Config{}, nil, err
 	}
 
 	var raw Config
-	if _, err := toml.Decode(string(data), &raw); err != nil {
-		return Config{}, []string{fmt.Sprintf("%s: %v; starting with no instances", filepath.Base(path), err)}, nil
+	md, err := toml.Decode(string(data), &raw)
+	if err != nil {
+		return Config{Notify: DefaultNotify()}, []string{fmt.Sprintf("%s: %v; starting with no instances", filepath.Base(path), err)}, nil
 	}
 
-	var c Config
+	c := Config{Notify: DefaultNotify()}
 	var warnings []string
+	// A setting that is absent keeps its default; one that is present wins,
+	// false included.
+	if md.IsDefined("notify", "desktop") {
+		c.Notify.Desktop = raw.Notify.Desktop
+	}
+	if md.IsDefined("notify", "watch") {
+		c.Notify.Watch = raw.Notify.Watch
+	}
+	if md.IsDefined("notify", "on") {
+		switch on := strings.TrimSpace(raw.Notify.On); on {
+		case NotifyDown, NotifyChanges:
+			c.Notify.On = on
+		default:
+			warnings = append(warnings, fmt.Sprintf("notify.on is %q; it must be %q or %q, using %q", on, NotifyDown, NotifyChanges, NotifyDown))
+		}
+	}
 	for i, in := range raw.Instances {
 		in.Name, in.URL = strings.TrimSpace(in.Name), strings.TrimSpace(in.URL)
 		if err := c.Add(in); err != nil {
@@ -104,11 +165,18 @@ func ValidURL(s string) error {
 // header is the comment Save and AppendInstance start a fresh file with.
 const header = "# lazykuma instances. Tokens live elsewhere; this file is safe to share.\n\n"
 
-// Save writes the config.
+// Save writes the config. An unset Notify is left out rather than written
+// as false everywhere, which would read back as "never notify".
 func Save(path string, c Config) error {
 	var b bytes.Buffer
 	b.WriteString(header)
-	if err := toml.NewEncoder(&b).Encode(c); err != nil {
+	var doc any = c
+	if c.Notify == (Notify{}) {
+		doc = struct {
+			Instances []Instance `toml:"instance"`
+		}{c.Instances}
+	}
+	if err := toml.NewEncoder(&b).Encode(doc); err != nil {
 		return err
 	}
 	return writeAtomic(path, b.Bytes(), 0o644)
@@ -132,7 +200,12 @@ func AppendInstance(path string, in Instance) error {
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
-	if err := toml.NewEncoder(&b).Encode(Config{Instances: []Instance{in}}); err != nil {
+	// Only the instance block: encoding a whole Config would also write an
+	// empty [notify] section, which reads back as "never notify".
+	block := struct {
+		Instances []Instance `toml:"instance"`
+	}{[]Instance{in}}
+	if err := toml.NewEncoder(&b).Encode(block); err != nil {
 		return err
 	}
 

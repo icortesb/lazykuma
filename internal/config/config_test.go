@@ -3,27 +3,97 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestPathsFollowXDG(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/x/cfg")
-	t.Setenv("XDG_STATE_HOME", "/x/state")
-	cfg, tok, err := Paths()
-	if err != nil {
-		t.Fatal(err)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join("x", "cfg"))
+	t.Setenv("XDG_STATE_HOME", filepath.Join("x", "state"))
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		cfg, tok, err := pathsFor(goos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != filepath.Join("x", "cfg", "lazykuma", "config.toml") || tok != filepath.Join("x", "state", "lazykuma", "tokens.json") {
+			t.Errorf("%s: got %s, %s", goos, cfg, tok)
+		}
 	}
-	if cfg != "/x/cfg/lazykuma/config.toml" || tok != "/x/state/lazykuma/tokens.json" {
-		t.Fatalf("got %s, %s", cfg, tok)
-	}
+}
 
+func TestPathsDefaults(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("XDG_STATE_HOME", "")
-	t.Setenv("HOME", "/home/u")
-	cfg, tok, _ = Paths()
-	if cfg != "/home/u/.config/lazykuma/config.toml" || tok != "/home/u/.local/state/lazykuma/tokens.json" {
-		t.Fatalf("defaults: %s, %s", cfg, tok)
+
+	t.Run("unix", func(t *testing.T) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Skip("no home directory here")
+		}
+		cfg, tok, err := pathsFor("linux")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != filepath.Join(home, ".config", "lazykuma", "config.toml") || tok != filepath.Join(home, ".local", "state", "lazykuma", "tokens.json") {
+			t.Fatalf("got %s, %s", cfg, tok)
+		}
+	})
+
+	t.Run("windows", func(t *testing.T) {
+		t.Setenv("AppData", filepath.Join("C", "Users", "u", "AppData", "Roaming"))
+		t.Setenv("LocalAppData", filepath.Join("C", "Users", "u", "AppData", "Local"))
+		cfg, tok, err := pathsFor("windows")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg != filepath.Join("C", "Users", "u", "AppData", "Roaming", "lazykuma", "config.toml") ||
+			tok != filepath.Join("C", "Users", "u", "AppData", "Local", "lazykuma", "tokens.json") {
+			t.Fatalf("got %s, %s", cfg, tok)
+		}
+	})
+}
+
+func TestNotifyDefaultsAndOverrides(t *testing.T) {
+	dir := t.TempDir()
+
+	c, warns, err := Load(filepath.Join(dir, "missing.toml"))
+	if err != nil || len(warns) != 0 || c.Notify != DefaultNotify() {
+		t.Fatalf("missing file: %+v %q %v", c.Notify, warns, err)
+	}
+
+	// A present false wins; an absent setting keeps its default.
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[notify]\nwatch = false\non = \"changes\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, warns, err = Load(path)
+	if err != nil || len(warns) != 0 {
+		t.Fatal(err, warns)
+	}
+	if c.Notify != (Notify{Desktop: false, Watch: false, On: NotifyChanges}) {
+		t.Fatalf("notify = %+v", c.Notify)
+	}
+
+	// An unknown "on" is reported and falls back.
+	if err := os.WriteFile(path, []byte("[notify]\non = \"always\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, warns, _ = Load(path)
+	if c.Notify.On != NotifyDown || len(warns) != 1 || !strings.Contains(warns[0], "always") {
+		t.Fatalf("notify = %+v, warnings %q", c.Notify, warns)
+	}
+
+	// Appending an instance to a file with a [notify] section still loads.
+	if err := os.WriteFile(path, []byte("[notify]\nwatch = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendInstance(path, Instance{Name: "home", URL: "http://kuma.lan"}); err != nil {
+		t.Fatal(err)
+	}
+	c, warns, err = Load(path)
+	if err != nil || len(warns) != 0 || c.Notify.Watch || len(c.Instances) != 1 {
+		t.Fatalf("after append: %+v %q %v", c, warns, err)
 	}
 }
 
@@ -150,7 +220,9 @@ func TestAppendInstanceThroughSymlinkStaysASymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "config.toml")
-	if err := os.Symlink(target, link); err != nil {
+	if err := os.Symlink(target, link); err != nil && runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	} else if err != nil {
 		t.Fatal(err)
 	}
 
@@ -218,7 +290,7 @@ func TestTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm != 0o600 {
 		t.Fatalf("token file mode %o, want 600", perm)
 	}
 

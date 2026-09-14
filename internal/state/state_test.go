@@ -275,3 +275,20 @@ func TestChannelsMaintenancesAndTypes(t *testing.T) {
 		t.Errorf("types = %v", in.Types)
 	}
 }
+
+func TestListedOnlyOnceTheMonitorListArrives(t *testing.T) {
+	in := Apply(Instance{}, kuma.Connected{}, t0)
+	in = Apply(in, kuma.Info{Version: "2.5.3"}, t0)
+	if in.Listed {
+		t.Fatal("listed before the monitor list")
+	}
+	in = Apply(in, kuma.MonitorList{Monitors: map[int]kuma.Monitor{}}, t0)
+	if !in.Listed {
+		t.Fatal("an empty monitor list still counts as listed")
+	}
+	// A reconnect starts over: the list held is from the last login.
+	in = Apply(Apply(in, kuma.Disconnected{}, t0), kuma.Connected{}, t0)
+	if in.Listed {
+		t.Fatal("still listed after a reconnect, before the new list")
+	}
+}

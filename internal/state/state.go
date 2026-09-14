@@ -115,11 +115,15 @@ type Incident struct {
 
 // Instance is everything known about one Kuma.
 type Instance struct {
-	Conn       Conn
-	Detail     string // why Conn is not ok: the error or Kuma's message
-	Version    string
-	Monitors   map[int]Monitor
-	LastEvent  time.Time // the last thing the server said
+	Conn      Conn
+	Detail    string // why Conn is not ok: the error or Kuma's message
+	Version   string
+	Monitors  map[int]Monitor
+	LastEvent time.Time // the last thing the server said
+	// Listed is whether the monitor list has arrived: Kuma sends it after
+	// every login, even when empty, so until then "no monitors" means
+	// "not told yet".
+	Listed     bool
 	StaleSince time.Time // when the data stopped being live; zero while connected
 
 	// Channels are the notification channels this Kuma sends alerts through.
@@ -148,7 +152,8 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 		in.Conn, in.Detail = ConnConnecting, ""
 		return in
 	case kuma.Connected:
-		in.Conn, in.Detail, in.StaleSince = ConnOK, "", time.Time{}
+		// Kuma sends the monitor list again after this login.
+		in.Conn, in.Detail, in.StaleSince, in.Listed = ConnOK, "", time.Time{}, false
 		return in
 	case kuma.Disconnected:
 		in.Conn = ConnDown
@@ -176,6 +181,7 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 			in.Version = ev.Version
 		}
 	case kuma.MonitorList:
+		in.Listed = true
 		next := make(map[int]Monitor, len(ev.Monitors))
 		for id, km := range ev.Monitors {
 			m := in.Monitors[id] // keeps the beats and stats already held

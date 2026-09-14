@@ -92,6 +92,13 @@ func Open(configPath, tokenPath string, opt Options) (*Core, error) {
 // Warnings are the config lines Load skipped.
 func (c *Core) Warnings() []string { return c.warnings }
 
+// Notify is when to raise desktop notifications, from the config.
+func (c *Core) Notify() config.Notify {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.Notify
+}
+
 // Updates names an instance each time its state changes. Changes coalesce
 // while a reader is busy, so it never falls behind; ask the instance for
 // the state itself.
