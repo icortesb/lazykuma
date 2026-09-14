@@ -152,7 +152,8 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 		in.Conn, in.Detail = ConnConnecting, ""
 		return in
 	case kuma.Connected:
-		in.Conn, in.Detail, in.StaleSince = ConnOK, "", time.Time{}
+		// Kuma sends the monitor list again after this login.
+		in.Conn, in.Detail, in.StaleSince, in.Listed = ConnOK, "", time.Time{}, false
 		return in
 	case kuma.Disconnected:
 		in.Conn = ConnDown

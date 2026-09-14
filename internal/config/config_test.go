@@ -64,24 +64,30 @@ func TestNotifyDefaultsAndOverrides(t *testing.T) {
 
 	// A present false wins; an absent setting keeps its default.
 	path := filepath.Join(dir, "config.toml")
-	os.WriteFile(path, []byte("[notify]\ndesktop = false\non = \"changes\"\n"), 0o644)
+	if err := os.WriteFile(path, []byte("[notify]\nwatch = false\non = \"changes\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	c, warns, err = Load(path)
 	if err != nil || len(warns) != 0 {
 		t.Fatal(err, warns)
 	}
-	if c.Notify != (Notify{Desktop: false, Watch: true, On: NotifyChanges}) {
+	if c.Notify != (Notify{Desktop: false, Watch: false, On: NotifyChanges}) {
 		t.Fatalf("notify = %+v", c.Notify)
 	}
 
 	// An unknown "on" is reported and falls back.
-	os.WriteFile(path, []byte("[notify]\non = \"always\"\n"), 0o644)
+	if err := os.WriteFile(path, []byte("[notify]\non = \"always\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	c, warns, _ = Load(path)
 	if c.Notify.On != NotifyDown || len(warns) != 1 || !strings.Contains(warns[0], "always") {
 		t.Fatalf("notify = %+v, warnings %q", c.Notify, warns)
 	}
 
 	// Appending an instance to a file with a [notify] section still loads.
-	os.WriteFile(path, []byte("[notify]\nwatch = false\n"), 0o644)
+	if err := os.WriteFile(path, []byte("[notify]\nwatch = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := AppendInstance(path, Instance{Name: "home", URL: "http://kuma.lan"}); err != nil {
 		t.Fatal(err)
 	}

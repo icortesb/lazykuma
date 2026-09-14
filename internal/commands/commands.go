@@ -34,26 +34,50 @@ func Watch(ctx context.Context, c *core.Core, sender notify.Sender, out io.Write
 	}
 	fmt.Fprintf(out, "watching %s; notifying on %s\n", strings.Join(names, ", "), describe(settings))
 
+	// Every change of connection state is printed, even the ones that are
+	// not worth a notification: a watch that silently lost an instance to
+	// a refused token must still say so somewhere.
+	conn := map[string]string{}
+	observe := func(name string) {
+		in, ok := c.Instance(name)
+		if !ok {
+			return
+		}
+		st := in.State()
+		if line := connLine(st); line != conn[name] {
+			conn[name] = line
+			fmt.Fprintf(out, "%s  %s: %s\n", now().Local().Format("2006-01-02 15:04:05"), name, line)
+		}
+		for _, ev := range tracker.Observe(name, st, now()) {
+			fmt.Fprintln(out, ev.Line())
+			if settings.Watch {
+				_ = sender.Send(ev.Title(), ev.Body())
+			}
+		}
+	}
+	tick := time.NewTicker(notify.Recheck)
+	defer tick.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case u := <-c.Updates():
-			in, ok := c.Instance(u.Instance)
-			if !ok {
-				continue
-			}
-			for _, ev := range tracker.Observe(u.Instance, in.State(), now()) {
-				fmt.Fprintln(out, ev.Line())
-				if !settings.Watch {
-					continue
-				}
-				if err := sender.Send(ev.Title(), ev.Body()); err != nil {
-					fmt.Fprintf(out, "could not show the notification: %v\n", err)
-				}
+			observe(u.Instance)
+		case <-tick.C:
+			for _, name := range tracker.Waiting() {
+				observe(name)
 			}
 		}
 	}
+}
+
+// connLine is an instance's connection state in words.
+func connLine(st state.Instance) string {
+	line := st.Conn.String()
+	if st.Detail != "" && st.Conn != state.ConnOK {
+		line += " (" + st.Detail + ")"
+	}
+	return line
 }
 
 // describe says in words what the watch will notify about.
@@ -80,11 +104,18 @@ const (
 type Report struct {
 	Up          int      `json:"up"`
 	Down        int      `json:"down"`
+	Pending     int      `json:"pending"`
 	Paused      int      `json:"paused"`
 	Maintenance int      `json:"maintenance"`
 	DownNames   []string `json:"-"`
 	Causes      []string `json:"-"`
-	Unreachable []string `json:"-"`
+	// Unreachable are the instances that could not be monitored, and
+	// UnreachableWhy the reason for each, in the same order.
+	Unreachable    []string `json:"-"`
+	UnreachableWhy []string `json:"-"`
+	// NotLoggedIn are instances the user has not logged in to yet: worth a
+	// mention, not an alarm.
+	NotLoggedIn []string `json:"-"`
 	Reachable   int      `json:"-"`
 }
 
@@ -96,23 +127,52 @@ func Status(ctx context.Context, c *core.Core, timeout time.Duration, asJSON boo
 	insts := c.Instances()
 	if len(insts) == 0 {
 		write(out, asJSON, "no instances", "no instances configured: add one with lazykuma first", "unreachable", Report{})
-		return ExitUnreachable
+		return exit(asJSON, ExitUnreachable)
 	}
 
 	if !waitSettled(ctx, c, timeout) && ctx.Err() != nil {
-		return ExitUnreachable
+		return exit(asJSON, ExitUnreachable)
 	}
 	r := summarize(c.Snapshot())
+	tooltip := append(append([]string{}, r.Causes...), unreachableLines(r)...)
+	for _, name := range r.NotLoggedIn {
+		tooltip = append(tooltip, name+": not logged in")
+	}
 	switch {
 	case r.Reachable == 0:
-		write(out, asJSON, "unreachable", strings.Join(r.Unreachable, "\n"), "unreachable", r)
-		return ExitUnreachable
+		write(out, asJSON, "unreachable", strings.Join(tooltip, "\n"), "unreachable", r)
+		return exit(asJSON, ExitUnreachable)
 	case r.Down > 0 || len(r.Unreachable) > 0:
-		write(out, asJSON, downText(r), strings.Join(append(r.Causes, r.Unreachable...), "\n"), "down", r)
-		return ExitDown
+		write(out, asJSON, downText(r), strings.Join(tooltip, "\n"), "down", r)
+		return exit(asJSON, ExitDown)
 	}
-	write(out, asJSON, fmt.Sprintf("%d up", r.Up), fmt.Sprintf("%d monitors up", r.Up), "up", r)
-	return ExitUp
+	text := fmt.Sprintf("%d up", r.Up)
+	if r.Pending > 0 {
+		text += fmt.Sprintf(", %d pending", r.Pending)
+	}
+	if len(tooltip) == 0 {
+		tooltip = []string{fmt.Sprintf("%d monitors up", r.Up)}
+	}
+	write(out, asJSON, text, strings.Join(tooltip, "\n"), "up", r)
+	return exit(asJSON, ExitUp)
+}
+
+// exit is the code Status returns. With --json it is always 0: waybar and
+// its relatives hide a module whose command fails, which would make it
+// vanish exactly when something is down; the class carries the state.
+func exit(asJSON bool, code int) int {
+	if asJSON {
+		return ExitUp
+	}
+	return code
+}
+
+func unreachableLines(r Report) []string {
+	out := make([]string, len(r.Unreachable))
+	for i, name := range r.Unreachable {
+		out[i] = name + ": " + r.UnreachableWhy[i]
+	}
+	return out
 }
 
 // waitSettled polls until every instance settles, the timeout passes, or ctx
@@ -165,12 +225,18 @@ func summarize(snap map[string]state.Instance) Report {
 	sort.Strings(names)
 	for _, name := range names {
 		st := snap[name]
-		if st.Conn != state.ConnOK {
-			detail := st.Conn.String()
+		switch st.Conn {
+		case state.ConnOK:
+		case state.ConnNoCred:
+			r.NotLoggedIn = append(r.NotLoggedIn, name)
+			continue
+		default:
+			why := st.Conn.String()
 			if st.Detail != "" {
-				detail += ": " + st.Detail
+				why += ": " + st.Detail
 			}
-			r.Unreachable = append(r.Unreachable, name+" "+detail)
+			r.Unreachable = append(r.Unreachable, name)
+			r.UnreachableWhy = append(r.UnreachableWhy, why)
 			continue
 		}
 		r.Reachable++
@@ -186,6 +252,8 @@ func summarize(snap map[string]state.Instance) Report {
 					cause += ": " + b.Msg
 				}
 				r.Causes = append(r.Causes, cause)
+			case state.StatusPending, state.StatusUnknown:
+				r.Pending++
 			case state.StatusPaused:
 				r.Paused++
 			case state.StatusMaintenance:
@@ -201,8 +269,8 @@ func downText(r Report) string {
 	if r.Down > 0 {
 		parts = append(parts, fmt.Sprintf("%d down: %s", r.Down, strings.Join(r.DownNames, ", ")))
 	}
-	for _, u := range r.Unreachable {
-		parts = append(parts, strings.SplitN(u, " ", 2)[0]+" unreachable")
+	for _, name := range r.Unreachable {
+		parts = append(parts, name+" unreachable")
 	}
 	return strings.Join(parts, "; ")
 }
@@ -211,13 +279,24 @@ func downText(r Report) string {
 // relatives read ({"text", "tooltip", "class"}).
 func write(out io.Writer, asJSON bool, text, tooltip, class string, r Report) {
 	if !asJSON {
+		// The summary first, for a script that reads one line; the details
+		// under it, for the person who ran it.
 		fmt.Fprintln(out, text)
+		if class != "up" && tooltip != "" {
+			for _, line := range strings.Split(tooltip, "\n") {
+				fmt.Fprintln(out, "  "+line)
+			}
+		}
 		return
 	}
+	// Waybar renders text and tooltip as Pango markup, and Kuma's messages
+	// can carry a page's HTML or a name with an ampersand.
 	json.NewEncoder(out).Encode(struct {
 		Text    string `json:"text"`
 		Tooltip string `json:"tooltip"`
 		Class   string `json:"class"`
 		Report
-	}{text, tooltip, class, r})
+	}{markup.Replace(text), markup.Replace(tooltip), class, r})
 }
+
+var markup = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")

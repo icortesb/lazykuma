@@ -32,6 +32,11 @@ type ReplyError struct{ Msg string }
 
 func (e *ReplyError) Error() string { return "kuma: " + e.Msg }
 
+// wsaeConnRefused is Windows' WSAECONNREFUSED, which syscall.ECONNREFUSED
+// does not match there; the wording check alone would miss a non-English
+// Windows.
+const wsaeConnRefused = syscall.Errno(10061)
+
 // Brief is a short, human cause for err, meant to fit a menu line even after
 // a wide terminal is accounted for: a real dial error can run to 180
 // characters ("kuma: failed to WebSocket dial: failed to send handshake
@@ -41,7 +46,8 @@ func Brief(err error) string {
 	// A refused connection is worded differently on every system, and
 	// Windows puts the word that matters last ("...the target machine
 	// actively refused it"), where a narrow terminal cuts it off.
-	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(err.Error(), "actively refused") {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, wsaeConnRefused) ||
+		strings.Contains(err.Error(), "actively refused") {
 		return "connection refused"
 	}
 	var opErr *net.OpError

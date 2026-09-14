@@ -42,10 +42,11 @@ const (
 	NotifyChanges = "changes"
 )
 
-// DefaultNotify is what a config without a [notify] section means: tell me
-// when something breaks, wherever lazykuma is running.
+// DefaultNotify is what a config without a [notify] section means: the
+// watch command raises the alerts. The terminal UI does not by default, or
+// running both would show every alert twice.
 func DefaultNotify() Notify {
-	return Notify{Desktop: true, Watch: true, On: NotifyDown}
+	return Notify{Desktop: false, Watch: true, On: NotifyDown}
 }
 
 // Config is the notification settings and the instances, in the order the

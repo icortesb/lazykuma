@@ -286,4 +286,9 @@ func TestListedOnlyOnceTheMonitorListArrives(t *testing.T) {
 	if !in.Listed {
 		t.Fatal("an empty monitor list still counts as listed")
 	}
+	// A reconnect starts over: the list held is from the last login.
+	in = Apply(Apply(in, kuma.Disconnected{}, t0), kuma.Connected{}, t0)
+	if in.Listed {
+		t.Fatal("still listed after a reconnect, before the new list")
+	}
 }

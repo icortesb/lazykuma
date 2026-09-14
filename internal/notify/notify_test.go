@@ -2,7 +2,10 @@ package notify
 
 import (
 	"errors"
+	"io"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -93,30 +96,149 @@ func TestUnreachableInstance(t *testing.T) {
 
 	// An instance that never connected is a setup problem, not an outage.
 	never := state.Apply(state.Instance{}, kuma.Disconnected{Err: errors.New("connection refused")}, t0)
-	if ev := tr.Observe("vps", never, t0); len(ev) != 0 {
-		t.Fatalf("never-reached instance raised %+v", ev)
+	for _, at := range []time.Time{t0, t0.Add(Grace)} {
+		if ev := tr.Observe("vps", never, at); len(ev) != 0 {
+			t.Fatalf("never-reached instance raised %+v", ev)
+		}
 	}
 
 	tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusUp}), t0)
 	lost := state.Apply(instance(map[int]kuma.Status{1: kuma.StatusUp}), kuma.Disconnected{Err: errors.New("connection refused")}, t0)
-	ev := tr.Observe("home", lost, t0)
-	if len(ev) != 1 || !ev[0].Down || ev[0].Monitor != "" || !strings.Contains(ev[0].Title(), "home is unreachable") {
+	if ev := tr.Observe("home", lost, t0); len(ev) != 0 {
+		t.Fatalf("reported before the grace period: %+v", ev)
+	}
+	if w := tr.Waiting(); len(w) != 1 || w[0] != "home" {
+		t.Fatalf("Waiting = %v", w)
+	}
+	if ev := tr.Observe("home", lost, t0.Add(Grace-time.Second)); len(ev) != 0 {
+		t.Fatalf("reported before the grace period: %+v", ev)
+	}
+	ev := tr.Observe("home", lost, t0.Add(Grace))
+	if len(ev) != 1 || !ev[0].Down || ev[0].Monitor != "" || !strings.Contains(ev[0].Title(), "home is unreachable") || ev[0].Cause != "connection refused" {
 		t.Fatalf("lost instance: %+v", ev)
 	}
+	if w := tr.Waiting(); len(w) != 0 {
+		t.Fatalf("still waiting on a reported instance: %v", w)
+	}
 	// Still down: said once, not on every reconnect attempt.
-	if ev := tr.Observe("home", lost, t0); len(ev) != 0 {
+	if ev := tr.Observe("home", lost, t0.Add(2*Grace)); len(ev) != 0 {
 		t.Fatalf("repeated %+v", ev)
 	}
 	// While unreachable, the monitors' stale statuses are not compared.
 	staleDown := state.Apply(instance(map[int]kuma.Status{1: kuma.StatusDown}), kuma.Disconnected{Err: errors.New("x")}, t0)
-	if ev := tr.Observe("home", staleDown, t0); len(ev) != 0 {
+	if ev := tr.Observe("home", staleDown, t0.Add(2*Grace)); len(ev) != 0 {
 		t.Fatalf("stale monitors raised %+v", ev)
 	}
 
 	// Back.
-	ev = tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusUp}), t0)
+	ev = tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusUp}), t0.Add(3*Grace))
 	if len(ev) != 1 || ev[0].Down || ev[0].Monitor != "" {
 		t.Fatalf("reconnected: %+v", ev)
+	}
+}
+
+func TestABriefDisconnectIsNotNews(t *testing.T) {
+	// A Kuma restart drops the connection for a few seconds.
+	tr := NewTracker(config.NotifyChanges)
+	tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusUp}), t0)
+	lost := state.Apply(instance(map[int]kuma.Status{1: kuma.StatusUp}), kuma.Disconnected{Err: io.EOF}, t0)
+	tr.Observe("home", lost, t0)
+	if ev := tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusUp}), t0.Add(5*time.Second)); len(ev) != 0 {
+		t.Fatalf("a restart raised %+v", ev)
+	}
+	// The next drop starts its own grace period.
+	tr.Observe("home", lost, t0.Add(Grace))
+	if ev := tr.Observe("home", lost, t0.Add(Grace+time.Second)); len(ev) != 0 {
+		t.Fatalf("the earlier drop's clock carried over: %+v", ev)
+	}
+}
+
+func TestUnreachableCauses(t *testing.T) {
+	up := instance(map[int]kuma.Status{1: kuma.StatusUp})
+	tests := map[string]struct {
+		ev   kuma.Event
+		want string
+	}{
+		"dropped":     {kuma.Disconnected{Err: io.EOF}, "connection lost"},
+		"bad token":   {kuma.AuthFailed{Msg: "authInvalidToken"}, "Kuma refused the login token; log in again"},
+		"unsupported": {kuma.Unsupported{Version: "1.23.16"}, "Kuma 1.23.16 is not supported; lazykuma needs v2"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			tr := NewTracker(config.NotifyDown)
+			tr.Observe("home", up, t0)
+			gone := state.Apply(up, tt.ev, t0)
+			tr.Observe("home", gone, t0)
+			ev := tr.Observe("home", gone, t0.Add(Grace))
+			if len(ev) != 1 || ev[0].Cause != tt.want {
+				t.Fatalf("got %+v, want cause %q", ev, tt.want)
+			}
+		})
+	}
+}
+
+type recorder struct {
+	mu   sync.Mutex
+	got  []string
+	gate chan struct{}
+	err  error
+}
+
+func (r *recorder) Send(title, body string) error {
+	if r.gate != nil {
+		<-r.gate
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, title+"|"+body)
+	return r.err
+}
+
+func (r *recorder) sent() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.got)
+}
+
+func TestAsyncNeverBlocksTheCaller(t *testing.T) {
+	// A notification daemon that hangs.
+	r := &recorder{gate: make(chan struct{})}
+	a := Async(r, nil)
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 100; i++ {
+			a.Send("t", "b")
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send blocked on a hung daemon")
+	}
+	close(r.gate)
+	// What fit in the queue (and the one in hand) still goes out; the rest
+	// was dropped.
+	deadline := time.Now().Add(2 * time.Second)
+	for len(r.sent()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if n := len(r.sent()); n == 0 || n > 17 {
+		t.Fatalf("delivered %d", n)
+	}
+}
+
+func TestAsyncReportsFailures(t *testing.T) {
+	errs := make(chan error, 1)
+	Async(&recorder{err: errors.New("no daemon")}, func(err error) { errs <- err }).Send("t", "b")
+	select {
+	case err := <-errs:
+		if err.Error() != "no daemon" {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the failure was not reported")
 	}
 }
 

@@ -99,29 +99,91 @@ func TestStatusAllUp(t *testing.T) {
 	}
 }
 
-func TestStatusSomethingDownAsJSON(t *testing.T) {
+// statusJSON is the report Status prints with --json.
+type statusJSON struct {
+	Text, Tooltip, Class string
+	Up, Down, Pending    int
+}
+
+func runStatusJSON(t *testing.T, c *core.Core) statusJSON {
+	t.Helper()
+	var out bytes.Buffer
+	// A status bar hides a module whose command fails: always 0.
+	if code := Status(context.Background(), c, 3*time.Second, true, &out); code != ExitUp {
+		t.Fatalf("exit %d with --json, output %q", code, out.String())
+	}
+	var got statusJSON
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("not JSON: %q", out.String())
+	}
+	return got
+}
+
+func TestStatusSomethingDown(t *testing.T) {
 	c, fakes := running(t, "", "home")
 	waitConnected(t, c, "home")
-	monitors(fakes["home"], map[int]string{1: "web", 2: "apcbrokers.com.ar"})
+	monitors(fakes["home"], map[int]string{1: "web", 2: "shop.example.com"})
 	beat(fakes["home"], 1, 1, 1, "200 - OK")
 	beat(fakes["home"], 2, 0, 2, "connect: connection refused")
 
 	var out bytes.Buffer
-	if code := Status(context.Background(), c, 3*time.Second, true, &out); code != ExitDown {
+	if code := Status(context.Background(), c, 3*time.Second, false, &out); code != ExitDown {
 		t.Fatalf("exit %d, output %q", code, out.String())
 	}
-	var got struct {
-		Text, Tooltip, Class string
-		Up, Down             int
+	if want := "1 down: shop.example.com\n  shop.example.com: connect: connection refused\n"; out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
 	}
-	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
-		t.Fatalf("not JSON: %q", out.String())
-	}
-	if got.Text != "1 down: apcbrokers.com.ar" || got.Class != "down" || got.Up != 1 || got.Down != 1 {
+
+	got := runStatusJSON(t, c)
+	if got.Text != "1 down: shop.example.com" || got.Class != "down" || got.Up != 1 || got.Down != 1 {
 		t.Fatalf("report = %+v", got)
 	}
 	if !strings.Contains(got.Tooltip, "connection refused") {
 		t.Errorf("tooltip = %q", got.Tooltip)
+	}
+}
+
+func TestStatusEscapesMarkup(t *testing.T) {
+	c, fakes := running(t, "", "home")
+	waitConnected(t, c, "home")
+	monitors(fakes["home"], map[int]string{1: "R&D <api>"})
+	beat(fakes["home"], 1, 0, 1, "<html>502 Bad Gateway</html>")
+
+	got := runStatusJSON(t, c)
+	if got.Text != "1 down: R&amp;D &lt;api&gt;" {
+		t.Errorf("text = %q", got.Text)
+	}
+	if got.Tooltip != "R&amp;D &lt;api&gt;: &lt;html&gt;502 Bad Gateway&lt;/html&gt;" {
+		t.Errorf("tooltip = %q", got.Tooltip)
+	}
+}
+
+func TestStatusCountsPending(t *testing.T) {
+	c, fakes := running(t, "", "home")
+	waitConnected(t, c, "home")
+	monitors(fakes["home"], map[int]string{1: "web", 2: "db"})
+	beat(fakes["home"], 1, 1, 1, "200 - OK")
+	beat(fakes["home"], 2, 2, 2, "retrying") // 2 is pending
+
+	got := runStatusJSON(t, c)
+	if got.Text != "1 up, 1 pending" || got.Class != "up" || got.Pending != 1 {
+		t.Fatalf("report = %+v", got)
+	}
+}
+
+func TestStatusNotLoggedInIsNotAnAlarm(t *testing.T) {
+	c, fakes := running(t, "", "home")
+	// An instance added but never logged in to.
+	if _, err := c.Add(config.Instance{Name: "lab", URL: kumatest.New(t, nil).URL()}); err != nil {
+		t.Fatal(err)
+	}
+	waitConnected(t, c, "home")
+	monitors(fakes["home"], map[int]string{1: "web"})
+	beat(fakes["home"], 1, 1, 1, "200 - OK")
+
+	got := runStatusJSON(t, c)
+	if got.Text != "1 up" || got.Class != "up" || !strings.Contains(got.Tooltip, "lab: not logged in") {
+		t.Fatalf("report = %+v", got)
 	}
 }
 
@@ -143,6 +205,9 @@ func TestStatusWaitsForTheFirstBeats(t *testing.T) {
 
 func TestStatusUnreachable(t *testing.T) {
 	c, fakes := running(t, "", "home")
+	// Close alone waits for open connections to end; drop the one the
+	// core may already hold, so the instance really is unreachable.
+	fakes["home"].Drop()
 	fakes["home"].Close()
 
 	var out bytes.Buffer

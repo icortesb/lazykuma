@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -33,6 +34,7 @@ usage:
   lazykuma watch                 report every outage until stopped
   lazykuma status [--json] [--timeout 10s]
                                  print the state once; exit 0 up, 1 down, 2 unreachable
+                                 (always 0 with --json: the class carries the state)
   lazykuma --version             print the version
 `
 
@@ -49,7 +51,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "":
 		return fail(stderr, tui())
 	case "watch":
-		return fail(stderr, watch(stdout))
+		return watch(args[1:], stdout, stderr)
 	case "status":
 		return status(args[1:], stdout, stderr)
 	case "-version", "--version", "version":
@@ -99,20 +101,31 @@ func tui() error {
 	// and a desktop notification when the config asks for one.
 	go func() {
 		tracker := notify.NewTracker(c.Notify().On)
-		var desktop notify.Desktop
+		// A notification daemon that is slow to answer must not hold up
+		// the screen; a failure has nowhere to go under the full-screen UI.
+		desktop := notify.Async(notify.Desktop{}, nil)
+		observe := func(name string) {
+			in, ok := c.Instance(name)
+			if !ok {
+				return
+			}
+			st := in.State()
+			p.Send(ui.InstanceState{Name: name, State: st})
+			for _, ev := range tracker.Observe(name, st, time.Now()) {
+				if c.Notify().Desktop {
+					_ = desktop.Send(ev.Title(), ev.Body())
+				}
+			}
+		}
+		tick := time.NewTicker(notify.Recheck)
+		defer tick.Stop()
 		for {
 			select {
 			case u := <-c.Updates():
-				in, ok := c.Instance(u.Instance)
-				if !ok {
-					continue
-				}
-				st := in.State()
-				p.Send(ui.InstanceState{Name: u.Instance, State: st})
-				for _, ev := range tracker.Observe(u.Instance, st, time.Now()) {
-					if c.Notify().Desktop {
-						_ = desktop.Send(ev.Title(), ev.Body())
-					}
+				observe(u.Instance)
+			case <-tick.C:
+				for _, name := range tracker.Waiting() {
+					observe(name)
 				}
 			case <-ctx.Done():
 				return
@@ -124,17 +137,52 @@ func tui() error {
 	return err
 }
 
-func watch(stdout io.Writer) error {
+func watch(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: lazykuma watch\n\nPrints every outage and recovery until stopped, and raises a desktop\nnotification unless [notify] watch = false.")
+	}
+	if code, done := parse(fs, args); done {
+		return code
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c, err := open(ctx)
 	if err != nil {
-		return err
+		return fail(stderr, err)
 	}
+	warn(stderr, c)
+	desktop := notify.Async(notify.Desktop{}, func(err error) {
+		fmt.Fprintln(stderr, "lazykuma: desktop notification:", err)
+	})
+	return fail(stderr, commands.Watch(ctx, c, desktop, stdout, time.Now))
+}
+
+// parse reads a subcommand's flags. done means the command must stop here
+// with code: 0 for -h, 2 for a flag it does not know.
+func parse(fs *flag.FlagSet, args []string) (code int, done bool) {
+	err := fs.Parse(args)
+	switch {
+	case errors.Is(err, flag.ErrHelp):
+		return 0, true
+	case err != nil:
+		return 2, true
+	case fs.NArg() > 0:
+		fmt.Fprintf(fs.Output(), "lazykuma %s: unexpected %q\n", fs.Name(), fs.Arg(0))
+		fs.Usage()
+		return 2, true
+	}
+	return 0, false
+}
+
+// warn prints what was wrong with the config, where a status bar reading
+// stdout will not mistake it for the answer.
+func warn(stderr io.Writer, c *core.Core) {
 	for _, w := range c.Warnings() {
-		fmt.Fprintln(stdout, "config:", w)
+		fmt.Fprintln(stderr, "lazykuma: config:", w)
 	}
-	return commands.Watch(ctx, c, notify.Desktop{}, stdout, time.Now)
 }
 
 func status(args []string, stdout, stderr io.Writer) int {
@@ -142,8 +190,8 @@ func status(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	asJSON := fs.Bool("json", false, `print {"text","tooltip","class"} for a status bar`)
 	timeout := fs.Duration("timeout", 10*time.Second, "how long to wait for every instance to answer")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, done := parse(fs, args); done {
+		return code
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -153,5 +201,6 @@ func status(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "lazykuma:", err)
 		return commands.ExitUnreachable
 	}
+	warn(stderr, c)
 	return commands.Status(ctx, c, *timeout, *asJSON, stdout)
 }

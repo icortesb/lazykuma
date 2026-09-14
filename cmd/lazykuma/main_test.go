@@ -18,6 +18,11 @@ func TestCommandLine(t *testing.T) {
 		{[]string{"help"}, 0, "lazykuma status [--json]", ""},
 		{[]string{"frobnicate"}, 2, "", `unknown command "frobnicate"`},
 		{[]string{"status", "--nope"}, 2, "", "flag provided but not defined"},
+		{[]string{"status", "-h"}, 0, "", "-timeout"},
+		{[]string{"status", "extra"}, 2, "", `unexpected "extra"`},
+		{[]string{"watch", "-h"}, 0, "", "usage: lazykuma watch"},
+		{[]string{"watch", "--json"}, 2, "", "flag provided but not defined"},
+		{[]string{"watch", "now"}, 2, "", `unexpected "now"`},
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.args, " "), func(t *testing.T) {
