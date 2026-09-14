@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"testing"
 	"time"
 )
@@ -278,15 +277,19 @@ func TestBriefOfADialError(t *testing.T) {
 		t.Fatal("Dial to a closed port succeeded")
 	}
 	got := Brief(err)
-	// "connection refused" on Linux and macOS, "actively refused it" on
-	// Windows: the useful word is the same.
-	if !strings.Contains(got, "refused") {
-		t.Fatalf("Brief(%v) = %q, want it to say the connection was refused", err, got)
+	// The same words on every system: Windows says "actively refused it",
+	// at the very end of a long sentence a narrow terminal cuts off.
+	if got != "connection refused" {
+		t.Fatalf("Brief(%v) = %q, want %q", err, got, "connection refused")
 	}
-	// The whole dial error runs to ~180 characters; the cause alone is ~30
-	// on Linux and ~85 on Windows, whose wording is longer.
-	if len(got) >= 100 {
-		t.Fatalf("Brief(%v) = %q is %d chars, want under 100", err, got, len(got))
+}
+
+func TestBriefOfWindowsRefusal(t *testing.T) {
+	// How Windows words it, as a wrapped error a dial returns there.
+	err := fmt.Errorf("kuma: failed to WebSocket dial: %w",
+		errors.New("dial tcp 127.0.0.1:1: connectex: No connection could be made because the target machine actively refused it."))
+	if got := Brief(err); got != "connection refused" {
+		t.Fatalf("Brief = %q", got)
 	}
 }
 

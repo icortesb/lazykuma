@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/coder/websocket"
@@ -37,6 +38,12 @@ func (e *ReplyError) Error() string { return "kuma: " + e.Msg }
 // request: Get ...: dial tcp ...: connect: connection refused"), most of it
 // noise once the reader just wants to know why. Never "" for a non-nil err.
 func Brief(err error) string {
+	// A refused connection is worded differently on every system, and
+	// Windows puts the word that matters last ("...the target machine
+	// actively refused it"), where a narrow terminal cuts it off.
+	if errors.Is(err, syscall.ECONNREFUSED) || strings.Contains(err.Error(), "actively refused") {
+		return "connection refused"
+	}
 	var opErr *net.OpError
 	if errors.As(err, &opErr) && opErr.Err != nil {
 		return opErr.Err.Error()
