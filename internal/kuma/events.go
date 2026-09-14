@@ -34,8 +34,9 @@ type Monitor struct {
 	Port        int
 	Active      bool // false when paused
 	Maintenance bool
-	Parent      int // 0 when the monitor is not in a group
-	Interval    int // seconds
+	Parent      int   // 0 when the monitor is not in a group
+	Interval    int   // seconds
+	Tags        []Tag // the tags on this monitor, in Kuma's order
 }
 
 // Target is what the monitor watches, the way the web UI shows it.
@@ -49,6 +50,20 @@ func (m Monitor) Target() string {
 		return m.Hostname
 	}
 	return m.Type
+}
+
+// IsGroup reports whether this monitor is a group: it checks nothing itself,
+// and other monitors point at it through Parent.
+func (m Monitor) IsGroup() bool { return m.Type == "group" }
+
+// Tag is a label on a monitor. ID and Name and Color belong to the tag and
+// are shared by every monitor carrying it; Value is this monitor's own, and
+// is often empty.
+type Tag struct {
+	ID    int
+	Name  string
+	Color string // "#RRGGBB"
+	Value string
 }
 
 // Beat is one heartbeat.
@@ -328,6 +343,12 @@ type rawMonitor struct {
 	Maintenance flexBool `json:"maintenance"`
 	Parent      int      `json:"parent"`
 	Interval    int      `json:"interval"`
+	Tags        []struct {
+		TagID int    `json:"tag_id"`
+		Name  string `json:"name"`
+		Color string `json:"color"`
+		Value string `json:"value"`
+	} `json:"tags"`
 }
 
 func decodeMonitors(a json.RawMessage) (map[int]Monitor, error) {
@@ -345,10 +366,14 @@ func decodeMonitors(a json.RawMessage) (map[int]Monitor, error) {
 			}
 			id = n
 		}
-		out[id] = Monitor{
+		m := Monitor{
 			ID: id, Name: r.Name, Type: r.Type, URL: r.URL, Hostname: r.Hostname, Port: r.Port,
 			Active: bool(r.Active), Maintenance: bool(r.Maintenance), Parent: r.Parent, Interval: r.Interval,
 		}
+		for _, t := range r.Tags {
+			m.Tags = append(m.Tags, Tag{ID: t.TagID, Name: t.Name, Color: t.Color, Value: t.Value})
+		}
+		out[id] = m
 	}
 	return out, nil
 }

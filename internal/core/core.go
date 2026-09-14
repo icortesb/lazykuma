@@ -342,6 +342,69 @@ func (i *Instance) DeleteMonitor(ctx context.Context, id int) error {
 	return s.DeleteMonitor(ctx, id)
 }
 
+// DeleteGroup removes a group, and the monitors in it when withMonitors.
+func (i *Instance) DeleteGroup(ctx context.Context, id int, withMonitors bool) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteGroup(ctx, id, withMonitors)
+}
+
+// Tags is every tag the instance has.
+func (i *Instance) Tags(ctx context.Context) ([]kuma.TagDef, error) {
+	s, err := i.session()
+	if err != nil {
+		return nil, err
+	}
+	return s.Tags(ctx)
+}
+
+// AddTag creates a tag.
+func (i *Instance) AddTag(ctx context.Context, name, color string) (kuma.TagDef, error) {
+	s, err := i.session()
+	if err != nil {
+		return kuma.TagDef{}, err
+	}
+	return s.AddTag(ctx, name, color)
+}
+
+// EditTag renames or recolours a tag.
+func (i *Instance) EditTag(ctx context.Context, t kuma.TagDef) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.EditTag(ctx, t)
+}
+
+// DeleteTag removes a tag everywhere.
+func (i *Instance) DeleteTag(ctx context.Context, id int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteTag(ctx, id)
+}
+
+// AddMonitorTag puts a tag on a monitor.
+func (i *Instance) AddMonitorTag(ctx context.Context, tagID, monitorID int, value string) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.AddMonitorTag(ctx, tagID, monitorID, value)
+}
+
+// DeleteMonitorTag takes a tag off a monitor.
+func (i *Instance) DeleteMonitorTag(ctx context.Context, tagID, monitorID int, value string) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteMonitorTag(ctx, tagID, monitorID, value)
+}
+
 // SaveNotification creates a channel, or edits the one with that id.
 func (i *Instance) SaveNotification(ctx context.Context, cfg map[string]any, id int) (int, error) {
 	s, err := i.session()
