@@ -107,6 +107,7 @@ func tui() error {
 		observe := func(name string) {
 			in, ok := c.Instance(name)
 			if !ok {
+				tracker.Forget(name)
 				return
 			}
 			st := in.State()
@@ -199,7 +200,7 @@ func status(args []string, stdout, stderr io.Writer) int {
 	c, err := open(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, "lazykuma:", err)
-		return commands.ExitUnreachable
+		return commands.Failed(*asJSON, err, stdout)
 	}
 	warn(stderr, c)
 	return commands.Status(ctx, c, *timeout, *asJSON, stdout)

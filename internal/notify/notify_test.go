@@ -242,6 +242,45 @@ func TestAsyncReportsFailures(t *testing.T) {
 	}
 }
 
+func TestAServerThatIsNotKumaV2IsNotAnOutage(t *testing.T) {
+	// A Kuma v1 server is connected for a moment, until its version is
+	// read, and never sends a monitor list lazykuma understands.
+	tr := NewTracker(config.NotifyDown)
+	connected := state.Apply(state.Instance{}, kuma.Connected{}, t0)
+	tr.Observe("old", connected, t0)
+	refused := state.Apply(connected, kuma.Unsupported{Version: "1.23.16"}, t0)
+	tr.Observe("old", refused, t0)
+	if ev := tr.Observe("old", refused, t0.Add(Grace)); len(ev) != 0 {
+		t.Fatalf("an unsupported server raised %+v", ev)
+	}
+}
+
+func TestLoggingOutRestartsTheGraceClock(t *testing.T) {
+	tr := NewTracker(config.NotifyDown)
+	up := instance(map[int]kuma.Status{1: kuma.StatusUp})
+	tr.Observe("home", up, t0)
+	lost := state.Apply(up, kuma.Disconnected{Err: io.EOF}, t0)
+	tr.Observe("home", lost, t0)
+	tr.Observe("home", state.Apply(up, kuma.AuthFailed{NoToken: true}, t0), t0.Add(time.Second))
+	// Logged in again, but the server is still down: a new drop, not the
+	// continuation of the old one.
+	tr.Observe("home", lost, t0.Add(Grace))
+	if ev := tr.Observe("home", lost, t0.Add(Grace+time.Second)); len(ev) != 0 {
+		t.Fatalf("reported without a grace period: %+v", ev)
+	}
+}
+
+func TestForget(t *testing.T) {
+	tr := NewTracker(config.NotifyDown)
+	up := instance(map[int]kuma.Status{1: kuma.StatusUp})
+	tr.Observe("home", up, t0)
+	tr.Observe("home", state.Apply(up, kuma.Disconnected{Err: io.EOF}, t0), t0)
+	tr.Forget("home")
+	if w := tr.Waiting(); len(w) != 0 {
+		t.Fatalf("a removed instance is still waiting: %v", w)
+	}
+}
+
 func TestDeletedMonitorIsForgotten(t *testing.T) {
 	tr := NewTracker(config.NotifyChanges)
 	tr.Observe("home", instance(map[int]kuma.Status{1: kuma.StatusDown, 2: kuma.StatusUp}), t0)

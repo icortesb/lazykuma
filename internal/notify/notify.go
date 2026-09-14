@@ -157,6 +157,14 @@ func (t *Tracker) Waiting() []string {
 	return names
 }
 
+// Forget drops an instance that was removed.
+func (t *Tracker) Forget(name string) {
+	delete(t.down, name)
+	delete(t.reached, name)
+	delete(t.since, name)
+	delete(t.lost, name)
+}
+
 // Recheck is how often to observe the Waiting instances again.
 const Recheck = Grace / 6
 
@@ -178,7 +186,15 @@ func (t *Tracker) Observe(name string, st state.Instance, now time.Time) []Event
 				events = append(events, Event{Instance: name, Cause: "connected again", Time: now})
 			}
 		}
-		t.reached[name] = true
+		// Reached once Kuma has sent its monitors: a server that is not
+		// Kuma v2 is connected for a moment before that is found out, and
+		// must stay a setup problem rather than become an outage.
+		if st.Listed {
+			t.reached[name] = true
+		}
+	case state.ConnNoCred:
+		// Logged out on purpose: whatever comes after starts a fresh clock.
+		delete(t.since, name)
 	case state.ConnDown, state.ConnBadCred, state.ConnUnsupported:
 		// Only an instance that was reachable can become unreachable; one
 		// that never answered is a configuration problem, not an outage.

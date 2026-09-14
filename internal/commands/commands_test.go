@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/icortesb/lazykuma/internal/config"
 	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kumatest"
+	"github.com/icortesb/lazykuma/internal/notify"
 	"github.com/icortesb/lazykuma/internal/state"
 )
 
@@ -185,6 +187,42 @@ func TestStatusNotLoggedInIsNotAnAlarm(t *testing.T) {
 	if got.Text != "1 up" || got.Class != "up" || !strings.Contains(got.Tooltip, "lab: not logged in") {
 		t.Fatalf("report = %+v", got)
 	}
+	var out bytes.Buffer
+	if code := Status(context.Background(), c, 3*time.Second, false, &out); code != ExitUp {
+		t.Fatalf("exit %d, output %q", code, out.String())
+	}
+	if out.String() != "1 up\n  lab: not logged in\n" {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestStatusNobodyLoggedIn(t *testing.T) {
+	c, _ := running(t, "")
+	if _, err := c.Add(config.Instance{Name: "lab", URL: kumatest.New(t, nil).URL()}); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if code := Status(context.Background(), c, 3*time.Second, false, &out); code != ExitUnreachable {
+		t.Fatalf("exit %d, output %q", code, out.String())
+	}
+	if out.String() != "not logged in\n  lab: not logged in\n" {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestFailedStillFeedsTheBar(t *testing.T) {
+	var out bytes.Buffer
+	if code := Failed(true, fmt.Errorf("config.toml: line 3: expected '='"), &out); code != 0 {
+		t.Fatalf("exit %d with --json", code)
+	}
+	var got statusJSON
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Class != "unreachable" || !strings.Contains(got.Tooltip, "line 3") {
+		t.Fatalf("output %q, %v", out.String(), err)
+	}
+	out.Reset()
+	if code := Failed(false, fmt.Errorf("x"), &out); code != ExitUnreachable || out.Len() != 0 {
+		t.Fatalf("plain: exit %d, output %q (the error goes to stderr)", code, out.String())
+	}
 }
 
 func TestStatusWaitsForTheFirstBeats(t *testing.T) {
@@ -216,6 +254,14 @@ func TestStatusUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "unreachable") {
 		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestStatusExplainsABrokenConfig(t *testing.T) {
+	c, _ := running(t, "[[instance\n")
+	got := runStatusJSON(t, c)
+	if got.Text != "no instances" || !strings.Contains(got.Tooltip, "config: ") {
+		t.Fatalf("report = %+v", got)
 	}
 }
 
@@ -344,6 +390,69 @@ func TestWatchPrintsOnlyWhenNotificationsAreOff(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "printed only") {
 		t.Errorf("the header does not say notifications are off: %q", out.String())
+	}
+}
+
+func TestWatchReportsARefusedTokenAfterTheGracePeriod(t *testing.T) {
+	// Once Kuma refuses the token the supervisor stops trying, so no update
+	// will come to carry the instance past the grace period: the recheck
+	// must.
+	defer func(d time.Duration) { recheck = d }(recheck)
+	recheck = 20 * time.Millisecond
+
+	var refuse atomic.Bool
+	login := kumatest.Login(false)
+	f := kumatest.New(t, func(event string, args []json.RawMessage) any {
+		if event == "loginByToken" && refuse.Load() {
+			return map[string]any{"ok": false, "msg": "authInvalidToken", "msgi18n": true}
+		}
+		return login(event, args)
+	})
+	c, _ := running(t, "", "spare") // a core with an instance, to add ours to
+	if _, err := c.Add(config.Instance{Name: "home", URL: f.URL()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetToken("home", f.URL(), "jwt"); err != nil {
+		t.Fatal(err)
+	}
+
+	var clock atomic.Int64
+	clock.Store(t0.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+	var out syncBuffer
+	sender := &recorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Watch(ctx, c, sender, &out, now)
+
+	waitConnected(t, c, "home")
+	monitors(f, map[int]string{1: "web"})
+	eventually(t, "the monitor list", func() bool {
+		in, _ := c.Instance("home")
+		return in.State().Listed
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	refuse.Store(true)
+	f.Drop()
+	eventually(t, "the refusal", func() bool {
+		in, _ := c.Instance("home")
+		return in.State().Conn == state.ConnBadCred
+	})
+	time.Sleep(100 * time.Millisecond) // Watch has seen it: the clock starts
+	if len(sender.all()) != 0 {
+		t.Fatalf("reported before the grace period: %v", sender.all())
+	}
+	clock.Add(int64(notify.Grace))
+	eventually(t, "the notification", func() bool { return len(sender.all()) == 1 })
+	if got := sender.all()[0]; got != "✖ home is unreachable | Kuma refused the login token; log in again" {
+		t.Fatalf("sent %q", got)
+	}
+	if strings.Count(out.String(), "home: connecting") != 0 {
+		t.Errorf("connecting printed: %q", out.String())
+	}
+	if !strings.Contains(out.String(), "home: bad cred") {
+		t.Errorf("the refusal was not printed: %q", out.String())
 	}
 }
 

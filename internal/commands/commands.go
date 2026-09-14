@@ -36,17 +36,21 @@ func Watch(ctx context.Context, c *core.Core, sender notify.Sender, out io.Write
 
 	// Every change of connection state is printed, even the ones that are
 	// not worth a notification: a watch that silently lost an instance to
-	// a refused token must still say so somewhere.
-	conn := map[string]string{}
+	// a refused token must still say so somewhere. Only a change of state
+	// counts: each reconnect attempt passes through "connecting" and may
+	// word its error differently, and a service left running for days must
+	// not fill the journal with them.
+	conn := map[string]state.Conn{}
 	observe := func(name string) {
 		in, ok := c.Instance(name)
 		if !ok {
+			tracker.Forget(name)
 			return
 		}
 		st := in.State()
-		if line := connLine(st); line != conn[name] {
-			conn[name] = line
-			fmt.Fprintf(out, "%s  %s: %s\n", now().Local().Format("2006-01-02 15:04:05"), name, line)
+		if was, seen := conn[name]; st.Conn != state.ConnConnecting && (!seen || was != st.Conn) {
+			conn[name] = st.Conn
+			fmt.Fprintf(out, "%s  %s: %s\n", now().Local().Format("2006-01-02 15:04:05"), name, connLine(st))
 		}
 		for _, ev := range tracker.Observe(name, st, now()) {
 			fmt.Fprintln(out, ev.Line())
@@ -55,7 +59,7 @@ func Watch(ctx context.Context, c *core.Core, sender notify.Sender, out io.Write
 			}
 		}
 	}
-	tick := time.NewTicker(notify.Recheck)
+	tick := time.NewTicker(recheck)
 	defer tick.Stop()
 	for {
 		select {
@@ -79,6 +83,10 @@ func connLine(st state.Instance) string {
 	}
 	return line
 }
+
+// recheck is how often Watch observes the instances waiting out the grace
+// period; a variable so a test need not wait seconds.
+var recheck = notify.Recheck
 
 // describe says in words what the watch will notify about.
 func describe(n config.Notify) string {
@@ -126,7 +134,13 @@ type Report struct {
 func Status(ctx context.Context, c *core.Core, timeout time.Duration, asJSON bool, out io.Writer) int {
 	insts := c.Instances()
 	if len(insts) == 0 {
-		write(out, asJSON, "no instances", "no instances configured: add one with lazykuma first", "unreachable", Report{})
+		// A config that failed to parse also ends here; say why, since a
+		// status bar never shows the warning on stderr.
+		details := []string{"no instances configured: add one with lazykuma first"}
+		for _, w := range c.Warnings() {
+			details = append(details, "config: "+w)
+		}
+		write(out, asJSON, "no instances", "unreachable", details, Report{})
 		return exit(asJSON, ExitUnreachable)
 	}
 
@@ -134,27 +148,39 @@ func Status(ctx context.Context, c *core.Core, timeout time.Duration, asJSON boo
 		return exit(asJSON, ExitUnreachable)
 	}
 	r := summarize(c.Snapshot())
-	tooltip := append(append([]string{}, r.Causes...), unreachableLines(r)...)
+	details := append(append([]string{}, r.Causes...), unreachableLines(r)...)
 	for _, name := range r.NotLoggedIn {
-		tooltip = append(tooltip, name+": not logged in")
+		details = append(details, name+": not logged in")
 	}
 	switch {
+	case r.Reachable == 0 && len(r.Unreachable) == 0:
+		// Every instance is only waiting for a login: nothing can be told,
+		// but nothing is wrong either.
+		write(out, asJSON, "not logged in", "unreachable", details, r)
+		return exit(asJSON, ExitUnreachable)
 	case r.Reachable == 0:
-		write(out, asJSON, "unreachable", strings.Join(tooltip, "\n"), "unreachable", r)
+		write(out, asJSON, "unreachable", "unreachable", details, r)
 		return exit(asJSON, ExitUnreachable)
 	case r.Down > 0 || len(r.Unreachable) > 0:
-		write(out, asJSON, downText(r), strings.Join(tooltip, "\n"), "down", r)
+		write(out, asJSON, downText(r), "down", details, r)
 		return exit(asJSON, ExitDown)
 	}
 	text := fmt.Sprintf("%d up", r.Up)
 	if r.Pending > 0 {
 		text += fmt.Sprintf(", %d pending", r.Pending)
 	}
-	if len(tooltip) == 0 {
-		tooltip = []string{fmt.Sprintf("%d monitors up", r.Up)}
-	}
-	write(out, asJSON, text, strings.Join(tooltip, "\n"), "up", r)
+	write(out, asJSON, text, "up", details, r)
 	return exit(asJSON, ExitUp)
+}
+
+// Failed reports that lazykuma could not even start checking, such as a
+// config it cannot read, and returns the exit code. A status bar still gets
+// its JSON, or the module would vanish with the error.
+func Failed(asJSON bool, err error, out io.Writer) int {
+	if asJSON {
+		write(out, true, "lazykuma error", "unreachable", []string{err.Error()}, Report{})
+	}
+	return exit(asJSON, ExitUnreachable)
 }
 
 // exit is the code Status returns. With --json it is always 0: waybar and
@@ -275,19 +301,22 @@ func downText(r Report) string {
 	return strings.Join(parts, "; ")
 }
 
-// write prints the report: a plain line, or the JSON waybar and its
-// relatives read ({"text", "tooltip", "class"}).
-func write(out io.Writer, asJSON bool, text, tooltip, class string, r Report) {
+// write prints the report: the text, then each detail indented under it;
+// or the JSON waybar and its relatives read ({"text", "tooltip", "class"}),
+// with the details as the tooltip.
+func write(out io.Writer, asJSON bool, text, class string, details []string, r Report) {
 	if !asJSON {
 		// The summary first, for a script that reads one line; the details
 		// under it, for the person who ran it.
 		fmt.Fprintln(out, text)
-		if class != "up" && tooltip != "" {
-			for _, line := range strings.Split(tooltip, "\n") {
-				fmt.Fprintln(out, "  "+line)
-			}
+		for _, line := range details {
+			fmt.Fprintln(out, "  "+line)
 		}
 		return
+	}
+	tooltip := strings.Join(details, "\n")
+	if tooltip == "" {
+		tooltip = fmt.Sprintf("%d monitors up", r.Up)
 	}
 	// Waybar renders text and tooltip as Pango markup, and Kuma's messages
 	// can carry a page's HTML or a name with an ampersand.
