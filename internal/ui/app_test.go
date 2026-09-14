@@ -395,7 +395,7 @@ func TestLongDialErrorFitsAndShowsCause(t *testing.T) {
 	for _, width := range []int{100, 60} {
 		h.send(tea.WindowSizeMsg{Width: width, Height: 30})
 		v := h.view()
-		if !strings.Contains(v, "connection refused") {
+		if !strings.Contains(v, "refused") { // "actively refused it" on Windows
 			t.Errorf("at %d columns the cause is gone:\n%s", width, v)
 		}
 		assertFits(t, v, width)

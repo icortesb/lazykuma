@@ -278,11 +278,15 @@ func TestBriefOfADialError(t *testing.T) {
 		t.Fatal("Dial to a closed port succeeded")
 	}
 	got := Brief(err)
-	if !strings.Contains(got, "connection refused") {
-		t.Fatalf("Brief(%v) = %q, want it to mention connection refused", err, got)
+	// "connection refused" on Linux and macOS, "actively refused it" on
+	// Windows: the useful word is the same.
+	if !strings.Contains(got, "refused") {
+		t.Fatalf("Brief(%v) = %q, want it to say the connection was refused", err, got)
 	}
-	if len(got) >= 60 {
-		t.Fatalf("Brief(%v) = %q is %d chars, want under 60", err, got, len(got))
+	// The whole dial error runs to ~180 characters; the cause alone is ~30
+	// on Linux and ~85 on Windows, whose wording is longer.
+	if len(got) >= 100 {
+		t.Fatalf("Brief(%v) = %q is %d chars, want under 100", err, got, len(got))
 	}
 }
 
