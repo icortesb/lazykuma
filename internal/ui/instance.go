@@ -39,7 +39,15 @@ type instAction int
 const (
 	instNone instAction = iota
 	instBack
-	instToggle // pause or resume the selected monitor
+	instToggle    // pause or resume the selected monitor
+	instNew       // create a monitor
+	instEdit      // edit the selected monitor
+	instDelete    // delete the selected monitor
+	instRaw       // edit the selected monitor's fields directly
+	instSilence   // silence the selected monitor
+	instSilenced  // what is silenced right now
+	instChannels  // the instance's notification channels
+	instIncidents // the instance's state changes
 )
 
 // visible is the monitors the list shows: sorted, and matching the filter.
@@ -105,6 +113,22 @@ func (s instanceScreen) Update(msg tea.KeyMsg, st state.Instance) (instanceScree
 		if n > 0 {
 			return s, instToggle, nil
 		}
+	case msg.String() == "n":
+		return s, instNew, nil
+	case msg.String() == "c":
+		return s, instChannels, nil
+	case msg.String() == "i":
+		return s, instIncidents, nil
+	case n > 0 && msg.String() == "e":
+		return s, instEdit, nil
+	case n > 0 && msg.String() == "d":
+		return s, instDelete, nil
+	case n > 0 && msg.String() == "r":
+		return s, instRaw, nil
+	case n > 0 && msg.String() == "m":
+		return s, instSilence, nil
+	case msg.String() == "M":
+		return s, instSilenced, nil
 	case key.Matches(msg, keys.Back):
 		if s.filter.Value() != "" {
 			s.filter.SetValue("")
@@ -148,6 +172,10 @@ func (s instanceScreen) View(name string, st state.Instance, width, height int) 
 	}
 	return head + "\n" + body
 }
+
+// keyHints is the footer of the instance screen, which now does rather more
+// than watch.
+const keyHints = "n new   e edit   d delete   r fields   p pause   m silence   M silenced   c channels   i incidents   / filter   esc menu"
 
 func (s instanceScreen) header(name string, st state.Instance) string {
 	c := st.Counts()

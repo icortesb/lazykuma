@@ -3,6 +3,8 @@ package kuma
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -275,6 +277,30 @@ func DecodeEvent(name string, args []json.RawMessage) (ev Event, ok bool, err er
 		}
 		return CertInfo{MonitorID: id, Valid: tls.Valid, DaysRemaining: tls.CertInfo.DaysRemaining}, true, nil
 
+	case "notificationList":
+		a, err := arg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		nl, err := decodeNotificationList(a)
+		return nl, err == nil, err
+
+	case "maintenanceList":
+		a, err := arg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		ml, err := decodeMaintenanceList(a)
+		return ml, err == nil, err
+
+	case "monitorTypeList":
+		a, err := arg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		mt, err := decodeMonitorTypes(a)
+		return mt, err == nil, err
+
 	case "info":
 		a, err := arg(0)
 		if err != nil {
@@ -386,4 +412,127 @@ func (b *flexBool) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("not a boolean: %s", data)
 	}
 	return nil
+}
+
+// Notification is a channel Kuma sends alerts through.
+type Notification struct {
+	ID        int
+	Name      string
+	Type      string
+	IsDefault bool
+	Active    bool
+	// Config holds the provider's own fields exactly as Kuma stores them,
+	// name, type and isDefault included; it is what an edit sends back.
+	Config map[string]any
+}
+
+// Maintenance is a window during which monitors stay quiet.
+type Maintenance struct {
+	ID          int
+	Title       string
+	Description string
+	Strategy    string // "manual" or "single"
+	Status      string // "under-maintenance", "scheduled", "ended", "inactive"
+	Active      bool
+	Start, End  string // "single" only, as Kuma writes them
+	Timezone    string
+}
+
+type (
+	// NotificationList is every channel, sent on connect and after a change.
+	NotificationList struct{ Notifications []Notification }
+	// MaintenanceList is every maintenance window, by id.
+	MaintenanceList struct{ Maintenances map[int]Maintenance }
+	// MonitorTypes is the monitor types this server supports, sorted.
+	MonitorTypes struct{ Types []string }
+)
+
+func (NotificationList) event() {}
+func (MaintenanceList) event()  {}
+func (MonitorTypes) event()     {}
+
+func decodeNotificationList(a json.RawMessage) (NotificationList, error) {
+	var raw []struct {
+		ID        int      `json:"id"`
+		Name      string   `json:"name"`
+		Active    flexBool `json:"active"`
+		IsDefault flexBool `json:"isDefault"`
+		Config    string   `json:"config"`
+	}
+	if err := json.Unmarshal(a, &raw); err != nil {
+		return NotificationList{}, err
+	}
+	out := NotificationList{Notifications: make([]Notification, 0, len(raw))}
+	for _, r := range raw {
+		n := Notification{ID: r.ID, Name: r.Name, Active: bool(r.Active), IsDefault: bool(r.IsDefault)}
+		// config is a JSON document inside a JSON string, and the provider
+		// name lives in it rather than in a column. One unreadable channel
+		// is skipped: dropping the whole list would leave the UI believing
+		// the instance has no channels, and an edit would then unlink them.
+		if err := json.Unmarshal([]byte(r.Config), &n.Config); err != nil {
+			continue
+		}
+		if t, ok := n.Config["type"].(string); ok {
+			n.Type = t
+		}
+		out.Notifications = append(out.Notifications, n)
+	}
+	return out, nil
+}
+
+func decodeMaintenanceList(a json.RawMessage) (MaintenanceList, error) {
+	var raw map[string]struct {
+		ID          int      `json:"id"`
+		Title       string   `json:"title"`
+		Description string   `json:"description"`
+		Strategy    string   `json:"strategy"`
+		Status      string   `json:"status"`
+		Active      flexBool `json:"active"`
+		DateRange   []string `json:"dateRange"`
+		Timezone    string   `json:"timezone"`
+	}
+	if err := json.Unmarshal(a, &raw); err != nil {
+		return MaintenanceList{}, err
+	}
+	out := MaintenanceList{Maintenances: make(map[int]Maintenance, len(raw))}
+	for _, r := range raw {
+		m := Maintenance{
+			ID: r.ID, Title: r.Title, Description: r.Description, Strategy: r.Strategy,
+			Status: r.Status, Active: bool(r.Active), Timezone: r.Timezone,
+		}
+		if len(r.DateRange) > 0 {
+			m.Start = r.DateRange[0]
+		}
+		if len(r.DateRange) > 1 {
+			m.End = r.DateRange[1]
+		}
+		out.Maintenances[m.ID] = m
+	}
+	return out, nil
+}
+
+// ClassicTypes are the monitor types Kuma implements outside the registry
+// it reports in monitorTypeList: http and its friends are missing from that
+// list, so any type picker must offer the union of both.
+var ClassicTypes = []string{"docker", "http", "json-query", "keyword", "ping", "push"}
+
+// All is every type this server can monitor: what it reported plus the
+// classic ones it leaves out, sorted and without repeats.
+func (m MonitorTypes) All() []string {
+	out := append(append([]string{}, m.Types...), ClassicTypes...)
+	sort.Strings(out)
+	return slices.Compact(out)
+}
+
+func decodeMonitorTypes(a json.RawMessage) (MonitorTypes, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(a, &raw); err != nil {
+		return MonitorTypes{}, err
+	}
+	out := MonitorTypes{Types: make([]string, 0, len(raw))}
+	for t := range raw {
+		out.Types = append(out.Types, t)
+	}
+	sort.Strings(out.Types)
+	return out, nil
 }

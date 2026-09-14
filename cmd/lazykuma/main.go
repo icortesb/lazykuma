@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/icortesb/lazykuma/internal/config"
+	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kuma"
 	"github.com/icortesb/lazykuma/internal/ui"
 )
@@ -35,45 +36,31 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	cfg, warnings, err := config.Load(cfgPath)
-	if err != nil {
-		return err
-	}
-	tokens, err := config.LoadTokens(tokPath)
+	c, err := core.Open(cfgPath, tokPath, core.Options{})
 	if err != nil {
 		return err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	c.Run(ctx)
 
-	// Supervisors start inside ui.New, before the program exists: their
-	// events wait for it.
-	var p *tea.Program
-	ready := make(chan struct{})
-	start := func(in config.Instance) ui.Controller {
-		sup := kuma.NewSupervisor(in.URL, func() string { return tokens.Get(in.Name, in.URL) }, func(ev kuma.Event) {
+	p := tea.NewProgram(ui.New(ui.Deps{Core: c, Login: kuma.Login, Version: version}), tea.WithAltScreen())
+
+	// Every state the core publishes becomes a message for the program.
+	go func() {
+		for {
 			select {
-			case <-ready:
-				p.Send(ui.InstanceEvent{Name: in.Name, Event: ev})
+			case u := <-c.Updates():
+				if in, ok := c.Instance(u.Instance); ok {
+					p.Send(ui.InstanceState{Name: u.Instance, State: in.State()})
+				}
 			case <-ctx.Done():
+				return
 			}
-		})
-		go sup.Run(ctx)
-		return sup
-	}
+		}
+	}()
 
-	m := ui.New(ui.Deps{
-		Config:     cfg,
-		ConfigPath: cfgPath,
-		Tokens:     tokens,
-		Warnings:   warnings,
-		Start:      start,
-		Login:      kuma.Login,
-		Version:    version,
-	})
-	p = tea.NewProgram(m, tea.WithAltScreen())
-	close(ready)
 	_, err = p.Run()
 	return err
 }

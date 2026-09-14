@@ -44,8 +44,8 @@ func TestSessionReceivesEvents(t *testing.T) {
 	f := newFakeKuma(t, nil)
 	s := dial(t, f)
 
-	f.push(`42["proxyList",[]]`) // not used by the TUI: dropped
-	f.push(`42["heartbeat",{"monitorID":3,"status":1,"time":"2026-09-11 00:12:49.103","msg":"200 - OK","ping":5,"important":false}]`)
+	f.Push(`42["proxyList",[]]`) // not used by the TUI: dropped
+	f.Push(`42["heartbeat",{"monitorID":3,"status":1,"time":"2026-09-11 00:12:49.103","msg":"200 - OK","ping":5,"important":false}]`)
 
 	for {
 		select {
@@ -67,8 +67,8 @@ func TestSessionReceivesEvents(t *testing.T) {
 func TestSessionAnswersPing(t *testing.T) {
 	f := newFakeKuma(t, nil)
 	dial(t, f)
-	f.push("2")
-	eventually(t, "a pong", func() bool { return f.received("3") })
+	f.Push("2")
+	eventually(t, "a pong", func() bool { return f.Received("3") })
 }
 
 func TestSessionLogin(t *testing.T) {
@@ -145,9 +145,9 @@ func TestDialGivesUpWhenKumaNeverListens(t *testing.T) {
 func TestDialFailsWhenServerDropsBeforeReady(t *testing.T) {
 	f := newSlowFakeKuma(t, time.Hour, nil)
 	go func() {
-		eventually(t, "the connect packet", func() bool { return f.received(frameConnect) })
+		eventually(t, "the connect packet", func() bool { return f.Received(frameConnect) })
 		time.Sleep(50 * time.Millisecond) // the fake answers 40 and info, then Dial waits
-		f.drop()
+		f.Drop()
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -170,8 +170,8 @@ func TestSessionPauseResume(t *testing.T) {
 	if err := s.Resume(ctx, 4); err != nil {
 		t.Fatal(err)
 	}
-	if !f.received(`421["pauseMonitor",4]`) || !f.received(`422["resumeMonitor",4]`) {
-		t.Fatalf("frames = %v", f.frames)
+	if !f.Received(`421["pauseMonitor",4]`) || !f.Received(`422["resumeMonitor",4]`) {
+		t.Fatalf("frames = %v", f.Frames())
 	}
 }
 
@@ -202,7 +202,7 @@ func TestSessionCallTimesOut(t *testing.T) {
 func TestSessionEndsWhenServerDrops(t *testing.T) {
 	f := newFakeKuma(t, nil)
 	s := dial(t, f)
-	f.drop()
+	f.Drop()
 
 	select {
 	case <-s.Done():
@@ -237,7 +237,7 @@ func TestLoginWhileKumaFloodsEvents(t *testing.T) {
 	f = newFakeKuma(t, func(event string, args []json.RawMessage) any {
 		if event == "login" || event == "loginByToken" {
 			for i := 0; i < 1000; i++ {
-				f.push(`42["avgPing","1",62]`)
+				f.Push(`42["avgPing","1",62]`)
 			}
 		}
 		return login(event, args)
@@ -306,7 +306,7 @@ func TestCloseDoesNotHangOnUnreadEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 300; i++ { // more than the Events buffer
-		f.push(`42["avgPing","1",62]`)
+		f.Push(`42["avgPing","1",62]`)
 	}
 	done := make(chan struct{})
 	go func() { s.Close(); close(done) }()

@@ -12,41 +12,26 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/icortesb/lazykuma/internal/config"
+	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kuma"
 	"github.com/icortesb/lazykuma/internal/state"
 )
 
-// Controller is what the UI asks of an instance's connection;
-// *kuma.Supervisor is one.
-type Controller interface {
-	Pause(ctx context.Context, id int) error
-	Resume(ctx context.Context, id int) error
-	Retry()
-}
-
 // Deps is what the UI needs from main.
 type Deps struct {
-	Config     config.Config
-	ConfigPath string
-	Tokens     *config.Tokens
-	Warnings   []string // from config.Load, shown on the menu at start
-
-	// Start begins watching an instance and returns its controller. The
-	// events it produces come back as InstanceEvent.
-	Start func(config.Instance) Controller
+	// Core owns the instances, their state and the actions on them.
+	Core *core.Core
 	// Login returns a token for an instance; kuma.Login.
 	Login func(ctx context.Context, url, username, password, code string) (string, error)
 
 	Version string
-	Now     func() time.Time // time.Now when nil
 }
 
-// InstanceEvent is an event of one instance, sent in by main with
-// tea.Program.Send.
-type InstanceEvent struct {
+// InstanceState is one instance's state, sent in by main with
+// tea.Program.Send as the core publishes it.
+type InstanceState struct {
 	Name  string
-	Event kuma.Event
+	State state.Instance
 }
 
 type screen int
@@ -57,18 +42,30 @@ const (
 	screenLogin
 	screenAdd
 	screenHelp
+	screenPick      // a type or a service, before its form
+	screenMonitor   // the curated monitor form
+	screenRaw       // the raw field editor
+	screenChannels  // the instance's notification channels
+	screenChannel   // one channel's form
+	screenSilence   // silence a monitor
+	screenSilenced  // what is silenced
+	screenIncidents // state changes
+	screenConfirm   // before something irreversible
 )
 
+// instance is an instance as the screens see it: the core's handle for
+// actions, and the last state it published.
 type instance struct {
-	cfg  config.Instance
+	inst *core.Instance
 	st   state.Instance
-	ctrl Controller
 }
+
+func (i instance) name() string { return i.inst.Name() }
+func (i instance) url() string  { return i.inst.URL() }
 
 // Model is the whole app.
 type Model struct {
 	deps   Deps
-	cfg    config.Config
 	insts  []instance
 	screen screen
 	back   screen // where esc from help returns
@@ -81,25 +78,38 @@ type Model struct {
 	login loginForm
 	add   addForm
 
+	pick     picker
+	mform    monitorForm
+	raw      rawEditor
+	chans    channelsScreen
+	cform    channelForm
+	silence  silenceForm
+	silenced maintenanceScreen
+	incs     incidentsScreen
+
+	// ask is the pending confirmation and what to run when it is accepted.
+	ask     confirm
+	onYes   tea.Cmd
+	backTo  screen // where the current form returns to
+	picking string // "monitor" or "channel", for what the picker chose
+
 	flash string
 }
 
 const noInstances = "no instances yet: add one"
 
-// New starts every configured instance and opens on the menu.
+// New opens on the menu, showing the instances the core holds.
 func New(d Deps) Model {
-	if d.Now == nil {
-		d.Now = time.Now
+	m := Model{deps: d, inst: newInstanceScreen(), width: 80, height: 24}
+	for _, in := range d.Core.Instances() {
+		m.insts = append(m.insts, instance{inst: in, st: in.State()})
 	}
-	m := Model{deps: d, cfg: d.Config, inst: newInstanceScreen(), width: 80, height: 24}
-	for _, in := range d.Config.Instances {
-		m.insts = append(m.insts, instance{cfg: in, ctrl: d.Start(in)})
-	}
+	warnings := d.Core.Warnings()
 	switch {
-	case len(d.Warnings) == 1:
-		m.flash = d.Warnings[0]
-	case len(d.Warnings) > 1:
-		m.flash = fmt.Sprintf("%s (and %d more)", d.Warnings[0], len(d.Warnings)-1)
+	case len(warnings) == 1:
+		m.flash = warnings[0]
+	case len(warnings) > 1:
+		m.flash = fmt.Sprintf("%s (and %d more)", warnings[0], len(warnings)-1)
 	case len(m.insts) == 0:
 		m.flash = noInstances
 	}
@@ -121,6 +131,14 @@ type (
 		token string
 		err   error
 	}
+	// monitorLoaded carries the whole monitor Kuma returned, for the form
+	// or the field editor.
+	monitorLoaded struct {
+		instance string // which instance asked: the user can move on
+		mon      kuma.RawMonitor
+		toRaw    bool
+		err      error
+	}
 	flashMsg      struct{ text string }
 	clearFlashMsg struct{ text string }
 )
@@ -136,7 +154,7 @@ func flashFor(text string, d time.Duration) tea.Cmd {
 
 func (m Model) find(name string) int {
 	for i, in := range m.insts {
-		if in.cfg.Name == name {
+		if in.name() == name {
 			return i
 		}
 	}
@@ -149,17 +167,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
-	case InstanceEvent:
+	case InstanceState:
 		if i := m.find(msg.Name); i >= 0 {
-			m.insts[i].st = state.Apply(m.insts[i].st, msg.Event, m.deps.Now())
+			m.insts[i].st = msg.State
 		}
 		return m, nil
 
 	case actionDone:
 		if msg.err != nil {
-			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, msg.err), 5*time.Second)
+			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, kuma.Brief(msg.err)), 8*time.Second)
 		}
-		return m, flashFor(msg.action+" "+msg.mon, 2*time.Second)
+		// A write lands: leave the form and let the instance's next state
+		// show the result.
+		switch m.screen {
+		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm:
+			m.screen = m.backTo
+		}
+		return m, flashFor(msg.action+" "+msg.mon, 3*time.Second)
+
+	case monitorLoaded:
+		if msg.err != nil {
+			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
+		}
+		if m.screen != screenInstance || m.current().name() != msg.instance {
+			// The user moved on while Kuma was answering; an edit opened now
+			// would save one instance's monitor into another.
+			return m, nil
+		}
+		if msg.toRaw {
+			m.raw = newRawEditor("monitor", 0, msg.mon)
+			m.backTo, m.screen = screenInstance, screenRaw
+			return m, nil
+		}
+		kind, _ := msg.mon["type"].(string)
+		if !isCuratedKind(kind) {
+			// No form knows this type's fields; its own values do.
+			m.raw = newRawEditor("monitor", 0, msg.mon)
+			m.backTo, m.screen = screenInstance, screenRaw
+			return m, nil
+		}
+		m.mform = editMonitorForm(msg.mon, m.channelToggles(false))
+		m.backTo, m.screen = screenInstance, screenMonitor
+		return m, nil
 
 	case loginDone:
 		return m.loginFinished(msg)
@@ -182,6 +231,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateMenu(msg)
 		case screenInstance:
 			return m.updateInstance(msg)
+		case screenPick:
+			return m.updatePick(msg)
+		case screenChannels:
+			return m.updateChannels(msg)
+		case screenSilenced:
+			return m.updateSilenced(msg)
+		case screenIncidents:
+			return m.updateIncidents(msg)
+		case screenConfirm:
+			answered, yes := m.ask.Update(msg)
+			if !answered {
+				return m, nil
+			}
+			cmd := m.onYes
+			m.screen, m.onYes = m.backTo, nil
+			if !yes {
+				return m, nil
+			}
+			return m, cmd
 		case screenHelp:
 			if key.Matches(msg, keys.Back, keys.Help, keys.Quit) {
 				m.screen = m.back
@@ -196,6 +264,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateLogin(msg)
 	case screenAdd:
 		return m.updateAdd(msg)
+	case screenMonitor:
+		return m.updateMonitorForm(msg)
+	case screenRaw:
+		return m.updateRaw(msg)
+	case screenChannel:
+		return m.updateChannelForm(msg)
+	case screenSilence:
+		return m.updateSilence(msg)
 	}
 	return m, nil
 }
@@ -203,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) menuItems() []menuItem {
 	items := make([]menuItem, 0, len(m.insts)+3)
 	for i, in := range m.insts {
-		items = append(items, menuItem{label: in.cfg.Name, desc: instanceDesc(in.cfg.URL, in.st), inst: i, target: screenInstance})
+		items = append(items, menuItem{label: in.name(), desc: instanceDesc(in.url(), in.st), inst: i, target: screenInstance})
 	}
 	return append(items,
 		menuItem{label: "Add instance", desc: "Watch another Uptime Kuma", inst: -1, target: screenAdd},
@@ -265,23 +341,53 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case instBack:
 		m.screen = screenMenu
 	case instToggle:
-		mon, ok := m.inst.selected(in.st)
-		if ok {
-			cmd = toggle(in.cfg.Name, in.ctrl, mon)
+		if mon, ok := m.inst.selected(in.st); ok {
+			cmd = toggle(in.inst, mon)
 		}
+	case instNew:
+		options := make([]option, 0, len(curatedKinds)+1)
+		for _, k := range curatedKinds {
+			options = append(options, option{kindLabel(k), k})
+		}
+		options = append(options, option{"Other type…", "other"})
+		m.pick = newPicker("New monitor", "what should it watch?", options)
+		m.picking, m.backTo, m.screen = "monitor", screenInstance, screenPick
+	case instEdit, instRaw:
+		if mon, ok := m.inst.selected(in.st); ok {
+			cmd = loadMonitor(in.inst, mon.ID, act == instRaw)
+		}
+	case instDelete:
+		if mon, ok := m.inst.selected(in.st); ok {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete %q?", mon.Name),
+				detail:   "Kuma removes the monitor and all of its history",
+			}
+			m.onYes, m.backTo, m.screen = deleteMonitor(in.inst, mon), screenInstance, screenConfirm
+		}
+	case instSilence:
+		if mon, ok := m.inst.selected(in.st); ok {
+			m.silence = newSilenceForm(mon)
+			m.backTo, m.screen = screenInstance, screenSilence
+		}
+	case instSilenced:
+		m.silenced, m.screen = maintenanceScreen{}, screenSilenced
+	case instChannels:
+		m.chans, m.screen = channelsScreen{}, screenChannels
+	case instIncidents:
+		m.incs, m.screen = newIncidentsScreen(), screenIncidents
 	}
 	return m, cmd
 }
 
 // toggle pauses a running monitor or resumes a paused one.
-func toggle(name string, ctrl Controller, mon state.Monitor) tea.Cmd {
+func toggle(in *core.Instance, mon state.Monitor) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if mon.Active {
-			return actionDone{name: name, action: "paused", mon: mon.Name, err: ctrl.Pause(ctx, mon.ID)}
+			return actionDone{name: in.Name(), action: "paused", mon: mon.Name, err: in.Pause(ctx, mon.ID)}
 		}
-		return actionDone{name: name, action: "resumed", mon: mon.Name, err: ctrl.Resume(ctx, mon.ID)}
+		return actionDone{name: in.Name(), action: "resumed", mon: mon.Name, err: in.Resume(ctx, mon.ID)}
 	}
 }
 
@@ -296,11 +402,12 @@ func (m Model) updateLogin(msg tea.Msg) (tea.Model, tea.Cmd) {
 		in := m.insts[m.cur]
 		user, pass, code := m.login.Values()
 		login := m.deps.Login
+		name, url := in.name(), in.url()
 		cmd = func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
-			tok, err := login(ctx, in.cfg.URL, user, pass, code)
-			return loginDone{name: in.cfg.Name, token: tok, err: err}
+			tok, err := login(ctx, url, user, pass, code)
+			return loginDone{name: name, token: tok, err: err}
 		}
 	}
 	return m, cmd
@@ -316,14 +423,10 @@ func (m Model) loginFinished(msg loginDone) (tea.Model, tea.Cmd) {
 		m.login, cmd = m.login.WithResult(msg.err)
 		return m, cmd
 	}
-	if err := m.deps.Tokens.Set(msg.name, m.insts[i].cfg.URL, msg.token); err != nil {
+	if err := m.deps.Core.SetToken(msg.name, m.insts[i].url(), msg.token); err != nil {
 		m.login, _ = m.login.WithResult(fmt.Errorf("logged in, but the token could not be saved: %w", err))
 		return m, nil
 	}
-	// The supervisor is waiting for a token; wake it. Until it connects the
-	// instance says so.
-	m.insts[i].st = state.Apply(m.insts[i].st, kuma.Connecting{}, m.deps.Now())
-	m.insts[i].ctrl.Retry()
 	m.inst, m.screen = newInstanceScreen(), screenInstance
 	return m, flashFor("logged in to "+msg.name, 2*time.Second)
 }
@@ -336,19 +439,13 @@ func (m Model) updateAdd(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case formCancel:
 		m.screen = screenMenu
 	case formSubmit:
-		in := m.add.Values()
-		next := m.cfg
-		next.Instances = append([]config.Instance(nil), m.cfg.Instances...)
-		if err := next.Add(in); err != nil {
+		cfg := m.add.Values()
+		added, err := m.deps.Core.Add(cfg)
+		if err != nil {
 			m.add = m.add.WithError(err)
 			return m, nil
 		}
-		if err := config.AppendInstance(m.deps.ConfigPath, in); err != nil {
-			m.add = m.add.WithError(fmt.Errorf("could not save %s: %w", m.deps.ConfigPath, err))
-			return m, nil
-		}
-		m.cfg = next
-		m.insts = append(m.insts, instance{cfg: in, ctrl: m.deps.Start(in)})
+		m.insts = append(m.insts, instance{inst: added, st: added.State()})
 		if m.flash == noInstances {
 			m.flash = ""
 		}
@@ -380,21 +477,41 @@ func (m Model) render() string {
 	switch m.screen {
 	case screenInstance:
 		in := m.insts[m.cur]
-		return m.chrome(m.inst.View(in.cfg.Name, in.st, m.width, m.height-2),
-			"j/k move   p pause/resume   / filter   ? help   esc menu")
+		return m.chrome(m.inst.View(in.name(), in.st, m.width, m.height-2), keyHints)
 	case screenLogin:
 		in := m.insts[m.cur]
-		return m.chrome(m.login.View(in.cfg.Name, in.cfg.URL), "")
+		return m.chrome(m.login.View(in.name(), in.url()), "")
 	case screenAdd:
 		return m.chrome(m.add.View(), "")
 	case screenHelp:
 		return m.chrome(helpText(), "esc back")
+	case screenPick:
+		return m.chrome(m.pick.View(m.width, m.height-2), "")
+	case screenMonitor:
+		return m.chrome(m.mform.View(m.width), "")
+	case screenRaw:
+		return m.chrome(m.raw.View(m.width, m.height-2), "")
+	case screenChannels:
+		in := m.current()
+		return m.chrome(m.chans.View(in.name(), in.st.Channels, m.width, m.height-2), "")
+	case screenChannel:
+		return m.chrome(m.cform.View(), "")
+	case screenSilence:
+		return m.chrome(m.silence.View(), "")
+	case screenSilenced:
+		in := m.current()
+		return m.chrome(m.silenced.View(in.name(), sortedMaintenances(in.st.Maintenances), m.width, m.height-2), "")
+	case screenIncidents:
+		in := m.current()
+		return m.chrome(m.incs.View(in.name(), in.st, m.width, m.height-2), "")
+	case screenConfirm:
+		return m.chrome(m.ask.View(), "")
 	}
 
 	names := make([]string, len(m.insts))
 	states := make([]state.Instance, len(m.insts))
 	for i, in := range m.insts {
-		names[i], states[i] = in.cfg.Name, in.st
+		names[i], states[i] = in.name(), in.st
 	}
 	return m.menu.View(m.width, m.height, m.menuItems(), semaphore(names, states), m.deps.Version, m.flash)
 }
@@ -418,23 +535,37 @@ func (m Model) chrome(body, hint string) string {
 }
 
 func helpText() string {
-	rows := [][2]string{
-		{"↑/k ↓/j", "move"},
-		{"enter", "open the instance, or log in to it"},
-		{"p", "pause or resume the selected monitor"},
-		{"/", "filter monitors by name or target; esc clears it"},
-		{"esc", "back"},
-		{"q", "quit, from the menu"},
-		{"ctrl+c", "quit, from anywhere"},
-	}
+	// The instance keys come from the same line the instance screen shows,
+	// so the two cannot drift apart.
 	var b strings.Builder
 	b.WriteString(styleHeading.Render("Keys") + "\n\n")
-	for _, r := range rows {
+	for _, r := range [][2]string{
+		{"↑/k ↓/j", "move"},
+		{"enter", "open an instance, or log in to it"},
+		{"esc", "back"},
+		{"?", "help"},
+		{"q", "quit, from the menu"},
+		{"ctrl+c", "quit, from anywhere"},
+	} {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", styleKey.Render(fmt.Sprintf("%-8s", r[0])), styleValue.Render(r[1])))
 	}
+	b.WriteString("\n" + styleHeading.Render("On an instance") + "\n\n")
+	for _, part := range strings.Split(keyHints, "   ") {
+		if part = strings.TrimSpace(part); part != "" {
+			b.WriteString("  " + styleValue.Render(part) + "\n")
+		}
+	}
+	b.WriteString("\n" + styleHeading.Render("In the field editor") + "\n\n")
+	b.WriteString("  " + styleValue.Render("enter edit   a add field   d delete   ctrl+s save") + "\n")
 	b.WriteString("\n" + styleHeading.Render("What lazykuma stores") + "\n\n")
-	b.WriteString(styleValue.Render("  The instances, in ~/.config/lazykuma/config.toml: safe to keep in dotfiles.\n"))
-	b.WriteString(styleValue.Render("  The login tokens, in ~/.local/state/lazykuma/tokens.json, readable only by you.\n"))
-	b.WriteString(styleValue.Render("  Passwords and 2FA codes are sent to Kuma once and never written anywhere.\n"))
+	// Each line is styled on its own: a newline inside a styled block makes
+	// lipgloss pad the lines to one width and push the next ones sideways.
+	for _, line := range []string{
+		"The instances, in ~/.config/lazykuma/config.toml: safe to keep in dotfiles.",
+		"The login tokens, in ~/.local/state/lazykuma/tokens.json, readable only by you.",
+		"Passwords, 2FA codes and channel secrets go to Kuma and are never written here.",
+	} {
+		b.WriteString("  " + styleValue.Render(line) + "\n")
+	}
 	return b.String()
 }
