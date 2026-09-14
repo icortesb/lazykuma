@@ -16,11 +16,14 @@ every instance you run, live, and pause or resume them without opening the brows
 
 ## Install
 
+Download a binary for Linux, macOS or Windows (amd64 or arm64) from the
+[releases](https://github.com/icortesb/lazykuma/releases), or:
+
 ```sh
 go install github.com/icortesb/lazykuma/cmd/lazykuma@latest
 ```
 
-Or clone and `make build`: one static binary, no runtime dependencies.
+One static binary, no runtime dependencies.
 
 ## Use
 
@@ -61,10 +64,64 @@ token is tied to the URL it was issued for, not the name.
 
 The menu footer says which instances answer: `home ok   vps down   lab no cred`.
 
+## Without the terminal UI
+
+### `lazykuma watch`
+
+Runs until stopped and reports every outage: one line per change on standard output, and a desktop
+notification (D-Bus on Linux, Notification Center on macOS, toasts on Windows). The state each
+monitor has when watch starts is its starting point, so a fresh start never raises an alert per
+monitor. Run it in a tmux pane, or as a service:
+
+```ini
+# ~/.config/systemd/user/lazykuma-watch.service
+[Service]
+ExecStart=%h/go/bin/lazykuma watch
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+### `lazykuma status`
+
+Answers once and exits: `0` when everything is up, `1` when something is down, `2` when no instance
+could be reached — so a script can tell "down" from "cannot tell".
+
+```sh
+$ lazykuma status
+6 up
+$ lazykuma status --json
+{"text":"1 down: apcbrokers.com.ar","tooltip":"apcbrokers.com.ar: connect: connection refused","class":"down","up":5,"down":1,"paused":0,"maintenance":0}
+```
+
+`--json` is the shape waybar and similar bars read. A waybar module:
+
+```json
+"custom/kuma": {
+  "exec": "lazykuma status --json",
+  "return-type": "json",
+  "interval": 60
+}
+```
+
+### Notifications
+
+In `config.toml`, all optional:
+
+```toml
+[notify]
+desktop = true   # the terminal UI notifies while it is open
+watch = true     # lazykuma watch notifies (it always prints)
+on = "down"      # "down", or "changes" to hear about recoveries too
+```
+
 ## What it stores
 
-- `~/.config/lazykuma/config.toml`: the instances, name and URL. Safe to keep in your dotfiles.
-- `~/.local/state/lazykuma/tokens.json`: the login token of each instance, mode 0600.
+- `~/.config/lazykuma/config.toml` (`%AppData%\lazykuma` on Windows): the instances and the
+  notification settings. Safe to keep in your dotfiles.
+- `~/.local/state/lazykuma/tokens.json` (`%LocalAppData%\lazykuma` on Windows): the login token
+  of each instance, readable only by you.
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured, if set, in place of `~/.config` and
 `~/.local/state`.
