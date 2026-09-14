@@ -33,7 +33,9 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	// Registered first so it runs last (t.Cleanup is LIFO): every other
+	// cleanup below needs s open to delete what it made.
+	t.Cleanup(func() { s.Close() })
 	if err := s.LoginByToken(ctx, token); err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +44,17 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add group: %v", err)
 	}
+	t.Cleanup(func() {
+		// The test itself deletes the group further down; a leftover
+		// "already deleted" complaint here is fine. What matters is that a
+		// t.Fatal before that point does not strand it, or the monitors it
+		// still holds, against a Kuma that outlives this test.
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteGroup(cctx, groupID, false); err != nil {
+			t.Logf("cleanup: delete group %d: %v", groupID, err)
+		}
+	})
 	childID, err := s.AddMonitor(ctx, RawMonitor{
 		"type": "http", "name": "it-child", "url": "https://example.com", "method": "GET",
 		"interval": 60, "retryInterval": 60, "maxretries": 0,
@@ -51,6 +64,13 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add child: %v", err)
 	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteMonitor(cctx, childID); err != nil {
+			t.Logf("cleanup: delete child %d: %v", childID, err)
+		}
+	})
 
 	// Move the child into the group the way the UI does.
 	child, err := s.GetMonitor(ctx, childID)
@@ -66,6 +86,13 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("add tag: %v", err)
 	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteTag(cctx, tag.ID); err != nil {
+			t.Logf("cleanup: delete tag %d: %v", tag.ID, err)
+		}
+	})
 	if err := s.AddMonitorTag(ctx, tag.ID, childID, "eu"); err != nil {
 		t.Fatalf("tag the child: %v", err)
 	}
@@ -83,6 +110,13 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteMonitor(cctx, cloneID); err != nil {
+			t.Logf("cleanup: delete clone %d: %v", cloneID, err)
+		}
+	})
 
 	// A fresh session's monitor list shows the tree and the tag.
 	events := make(chan Event, 1024)
@@ -119,8 +153,7 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if after["parent"] != nil {
 		t.Fatalf("child parent after delete = %v", after["parent"])
 	}
-	for _, id := range []int{childID, cloneID} {
-		s.DeleteMonitor(ctx, id)
-	}
-	s.DeleteTag(ctx, tag.ID)
+	// The rest of the cleanup (child, clone, tag, and a no-op retry of the
+	// group delete above) runs through t.Cleanup, registered next to each
+	// object's creation, so it still runs if an assertion above t.Fatals.
 }
