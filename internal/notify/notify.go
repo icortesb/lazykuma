@@ -230,6 +230,9 @@ func (t *Tracker) Observe(name string, st state.Instance, now time.Time) []Event
 	}
 	for _, id := range sortedIDs(st.Monitors) {
 		m := st.Monitors[id]
+		if m.IsGroup() {
+			continue // its children are reported; the group would repeat them
+		}
 		var isDown bool
 		switch m.Status() {
 		case state.StatusDown:
