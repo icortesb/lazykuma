@@ -124,6 +124,52 @@ func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m Model) updateTags(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	tags := m.tagDefs[in.name()]
+	var act tagAction
+	m.tags, act = m.tags.Update(msg, tags)
+	switch act {
+	case tagBack:
+		m.screen = screenInstance
+	case tagNew:
+		m.tform = newTagForm(kuma.TagDef{Color: kuma.TagColors[0].Hex})
+		m.backTo, m.screen = screenTags, screenTag
+	case tagEdit:
+		if t, ok := m.tags.selected(tags); ok {
+			m.tform = newTagForm(t)
+			m.backTo, m.screen = screenTags, screenTag
+		}
+	case tagDelete:
+		if t, ok := m.tags.selected(tags); ok {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the tag %q?", t.Name),
+				detail:   "Kuma takes it off every monitor that carries it",
+			}
+			m.onYes, m.backTo, m.screen = deleteTag(in.inst, t), screenTags, screenConfirm
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateTagForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.tform, act, cmd = m.tform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		t, err := m.tform.Values()
+		if err != nil {
+			m.tform.err = err.Error()
+			return m, nil
+		}
+		return m, saveTag(m.current().inst, t)
+	}
+	return m, cmd
+}
+
 func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var act formAction
 	var cmd tea.Cmd

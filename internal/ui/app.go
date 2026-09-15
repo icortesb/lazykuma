@@ -52,6 +52,8 @@ const (
 	screenIncidents // state changes
 	screenConfirm   // before something irreversible
 	screenName      // a group's name
+	screenTags      // an instance's tags
+	screenTag       // one tag's form
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -88,7 +90,11 @@ type Model struct {
 	silenced maintenanceScreen
 	incs     incidentsScreen
 	nform    nameForm
+	tags     tagsScreen
+	tform    tagForm
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
+
+	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
 
 	// ask is the pending confirmation and what to run when it is accepted.
 	ask     confirm
@@ -103,7 +109,7 @@ const noInstances = "no instances yet: add one"
 
 // New opens on the menu, showing the instances the core holds.
 func New(d Deps) Model {
-	m := Model{deps: d, inst: newInstanceScreen(), width: 80, height: 24}
+	m := Model{deps: d, inst: newInstanceScreen(), width: 80, height: 24, tagDefs: map[string][]kuma.TagDef{}}
 	for _, in := range d.Core.Instances() {
 		m.insts = append(m.insts, instance{inst: in, st: in.State()})
 	}
@@ -183,10 +189,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// A write lands: leave the form and let the instance's next state
 		// show the result.
 		switch m.screen {
-		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenPick, screenName:
+		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenPick, screenName, screenTag:
 			m.screen = m.backTo
 		}
-		return m, flashFor(msg.action+" "+msg.mon, 3*time.Second)
+		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
+		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
+			return m, tea.Batch(done, loadTags(m.current().inst))
+		}
+		return m, done
+
+	case tagsLoaded:
+		if msg.err != nil {
+			return m, flashFor("tags: "+kuma.Brief(msg.err), 8*time.Second)
+		}
+		m.tagDefs[msg.instance] = msg.tags
+		return m, nil
 
 	case monitorLoaded:
 		if msg.err != nil {
@@ -242,6 +259,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSilenced(msg)
 		case screenIncidents:
 			return m.updateIncidents(msg)
+		case screenTags:
+			return m.updateTags(msg)
 		case screenConfirm:
 			answered, yes := m.ask.Update(msg)
 			if !answered {
@@ -277,6 +296,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSilence(msg)
 	case screenName:
 		return m.updateName(msg)
+	case screenTag:
+		return m.updateTagForm(msg)
 	}
 	return m, nil
 }
@@ -330,7 +351,7 @@ func (m Model) openInstance(i int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.inst, m.screen = newInstanceScreen(), screenInstance
-	return m, nil
+	return m, loadTags(m.insts[i].inst)
 }
 
 func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -426,6 +447,9 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.chans, m.screen = channelsScreen{}, screenChannels
 	case instIncidents:
 		m.incs, m.screen = newIncidentsScreen(), screenIncidents
+	case instTags:
+		m.tags, m.screen = tagsScreen{}, screenTags
+		cmd = loadTags(in.inst)
 	}
 	return m, cmd
 }
@@ -479,7 +503,7 @@ func (m Model) loginFinished(msg loginDone) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.inst, m.screen = newInstanceScreen(), screenInstance
-	return m, flashFor("logged in to "+msg.name, 2*time.Second)
+	return m, tea.Batch(flashFor("logged in to "+msg.name, 2*time.Second), loadTags(m.insts[i].inst))
 }
 
 func (m Model) updateAdd(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -559,6 +583,11 @@ func (m Model) render() string {
 		return m.chrome(m.ask.View(), "")
 	case screenName:
 		return m.chrome(m.nform.View(), "")
+	case screenTags:
+		in := m.current()
+		return m.chrome(m.tags.View(in.name(), m.tagDefs[in.name()], m.width, m.height-2), "")
+	case screenTag:
+		return m.chrome(m.tform.View(), "")
 	}
 
 	names := make([]string, len(m.insts))

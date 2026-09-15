@@ -109,6 +109,15 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			return out
 		case "testNotification":
 			return map[string]any{"ok": false, "msg": "Request failed with status code 401"}
+		case "getTags":
+			return map[string]any{"ok": true, "tags": []map[string]any{{"id": 4, "name": "region", "color": "#2563EB"}}}
+		case "addTag":
+			var tag map[string]any
+			json.Unmarshal(args[0], &tag)
+			tag["id"] = 8
+			return map[string]any{"ok": true, "tag": tag}
+		case "editTag", "deleteTag", "addMonitorTag", "deleteMonitorTag":
+			return map[string]any{"ok": true, "msg": "Saved."}
 		}
 		return login(event, args)
 	}
