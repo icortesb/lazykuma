@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -80,9 +81,47 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.cform = newChannelForm(value)
 			m.backTo, m.screen = screenChannels, screenChannel
+		case "move":
+			parent, _ := strconv.Atoi(value)
+			return m, moveMonitor(m.current().inst, m.moving, parent)
+		case "delgroup":
+			g := m.moving
+			switch value {
+			case "keep":
+				return m, deleteGroup(m.current().inst, g, false)
+			case "all":
+				m.ask = confirm{
+					question: fmt.Sprintf("Delete %s and its %s?", g.Name, monitors(countMonitors(m.current().st, g))),
+					detail:   "Kuma removes every monitor in the group and all of their history",
+				}
+				m.onYes, m.backTo, m.screen = deleteGroup(m.current().inst, g, true), screenInstance, screenConfirm
+				return m, nil
+			}
+			m.screen = screenInstance
 		}
 	}
 	return m, nil
+}
+
+func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.nform, act, cmd = m.nform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		name, err := m.nform.Value()
+		if err != nil {
+			m.nform.err = err.Error()
+			return m, nil
+		}
+		if m.nform.id == 0 {
+			return m, addGroup(m.current().inst, name)
+		}
+		return m, renameGroup(m.current().inst, m.nform.id, name)
+	}
+	return m, cmd
 }
 
 func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -211,7 +250,7 @@ func (m Model) updateSilence(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The monitor was chosen when the form opened: the list can reorder
 		// underneath while the times are typed.
-		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, start, end)
+		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end)
 	}
 	return m, cmd
 }
@@ -314,11 +353,11 @@ func testChannel(in *core.Instance, c kuma.Notification) tea.Cmd {
 	}
 }
 
-func silenceMonitor(in *core.Instance, title string, mon state.Monitor, start, end time.Time) tea.Cmd {
+func silenceMonitor(in *core.Instance, title string, mon state.Monitor, ids []int, start, end time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		_, err := in.Silence(ctx, title, []int{mon.ID}, start, end)
+		_, err := in.Silence(ctx, title, ids, start, end)
 		return actionDone{name: in.Name(), action: "silenced", mon: mon.Name, err: err}
 	}
 }

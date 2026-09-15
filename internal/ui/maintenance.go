@@ -23,9 +23,10 @@ type silenceForm struct {
 	// monitor is fixed when the form opens: the list under it can reorder
 	// while the window is being typed.
 	monitor state.Monitor
+	covers  []int // the monitor ids the maintenance lists: the monitor, or a group and all it holds
 }
 
-func newSilenceForm(mon state.Monitor) silenceForm {
+func newSilenceForm(mon state.Monitor, covers []int) silenceForm {
 	f := form{fields: []textinputModel{
 		newField("title  ", "deploy"),
 		newField("from   ", "now"),
@@ -33,7 +34,7 @@ func newSilenceForm(mon state.Monitor) silenceForm {
 	}, shown: 3}
 	f, _ = f.focusOn(0)
 	f.fields[0].SetValue("maintenance: " + mon.Name)
-	return silenceForm{form: f, monitor: mon}
+	return silenceForm{form: f, monitor: mon, covers: covers}
 }
 
 func (s silenceForm) Update(msg tea.Msg) (silenceForm, formAction, tea.Cmd) {

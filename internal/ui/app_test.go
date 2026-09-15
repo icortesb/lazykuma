@@ -90,9 +90,11 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 		case "add":
 			return map[string]any{"ok": true, "msg": "successAdded", "monitorID": 9}
 		case "getMonitor":
+			var id int
+			json.Unmarshal(args[0], &id)
 			return map[string]any{"ok": true, "monitor": map[string]any{
-				"id": 1, "type": "http", "name": "nextcloud", "url": "https://cloud.home.lan",
-				"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true,
+				"id": id, "type": "http", "name": "nextcloud", "url": "https://cloud.home.lan",
+				"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true, "parent": nil,
 				"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
 			}}
 		case "editMonitor", "deleteMonitor", "addNotification", "deleteNotification",
