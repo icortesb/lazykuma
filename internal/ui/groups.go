@@ -144,6 +144,26 @@ func editField(in *core.Instance, id int, action, what string, change func(kuma.
 	}
 }
 
+// toggleGroup pauses a running group, or resumes a paused one, together with
+// everything in it. Kuma pauses only the monitor it is told to: the children
+// of a paused group are listed as paused, but keep being checked.
+func toggleGroup(in *core.Instance, g state.Monitor, ids []int) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
+		defer cancel()
+		action, call := "paused", in.Pause
+		if !g.Active {
+			action, call = "resumed", in.Resume
+		}
+		for _, id := range ids {
+			if err := call(ctx, id); err != nil {
+				return actionDone{name: in.Name(), action: action, mon: "group " + g.Name, err: err}
+			}
+		}
+		return actionDone{name: in.Name(), action: action, mon: "group " + g.Name}
+	}
+}
+
 func deleteGroup(in *core.Instance, g state.Monitor, withMonitors bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)

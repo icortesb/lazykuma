@@ -350,12 +350,19 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !hasRow {
 			break
 		}
-		if row.Group && row.Active {
-			m.ask = confirm{
-				question: fmt.Sprintf("Pause %s and its %s?", row.Name, monitors(row.Children)),
-				detail:   "Kuma stops checking every monitor in the group until it is resumed",
+		if row.Group {
+			verb, detail := "Pause", "Kuma stops checking every monitor in the group until it is resumed"
+			if !row.Active {
+				verb, detail = "Resume", "every monitor in the group is resumed, including any paused on its own"
 			}
-			m.onYes, m.backTo, m.screen = toggle(in.inst, row.Monitor), screenInstance, screenConfirm
+			m.ask = confirm{
+				question: fmt.Sprintf("%s %s and its %s?", verb, row.Name, monitors(row.Children)),
+				detail:   detail,
+			}
+			// The ids are taken now: the group can change while the question
+			// is on screen, and the answer is to what was asked.
+			ids := coveredBy(in.st, row.Monitor)
+			m.onYes, m.backTo, m.screen = toggleGroup(in.inst, row.Monitor, ids), screenInstance, screenConfirm
 			break
 		}
 		cmd = toggle(in.inst, row.Monitor)

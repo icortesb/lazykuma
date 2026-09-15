@@ -118,8 +118,36 @@ func TestPauseAGroupAsks(t *testing.T) {
 		t.Fatalf("no confirmation:\n%s", h.view())
 	}
 	h.press("y")
-	if !h.fakes["home"].Sent(`["pauseMonitor",1]`) {
-		t.Fatalf("group not paused: %v", h.fakes["home"].Frames())
+	f := h.fakes["home"]
+	for _, frame := range []string{`["pauseMonitor",1]`, `["pauseMonitor",2]`, `["pauseMonitor",3]`} {
+		if !f.Sent(frame) {
+			t.Fatalf("%s not sent: %v", frame, f.Frames())
+		}
+	}
+	if f.Sent(`["pauseMonitor",9]`) {
+		t.Errorf("a monitor outside the group was paused: %v", f.Frames())
+	}
+}
+
+func TestResumeAGroupAsks(t *testing.T) {
+	h := onInstance(t, withMonitors(map[int]kuma.Monitor{
+		1: {ID: 1, Name: "Shop", Type: "group"},
+		2: {ID: 2, Name: "web", Type: "http", URL: "https://shop.example.com", Parent: 1},
+		3: {ID: 3, Name: "api", Type: "http", URL: "https://api.example.com", Parent: 1},
+	}))
+	h.press("p")
+	if !strings.Contains(h.view(), "Resume Shop and its 2 monitors?") {
+		t.Fatalf("no confirmation:\n%s", h.view())
+	}
+	h.press("y")
+	f := h.fakes["home"]
+	for _, frame := range []string{`["resumeMonitor",1]`, `["resumeMonitor",2]`, `["resumeMonitor",3]`} {
+		if !f.Sent(frame) {
+			t.Fatalf("%s not sent: %v", frame, f.Frames())
+		}
+	}
+	if !strings.Contains(h.view(), "resumed group Shop") {
+		t.Errorf("no flash:\n%s", h.view())
 	}
 }
 
