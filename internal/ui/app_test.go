@@ -225,13 +225,13 @@ func TestOpenInstanceAndPause(t *testing.T) {
 	if !strings.Contains(h.view(), "home · 2 monitors") {
 		t.Fatalf("not on the instance:\n%s", h.view())
 	}
-	h.press("p")      // backup is first (b < n) and paused: resume it
-	h.press("j", "p") // nextcloud: pause it
+	h.press("p")      // nextcloud is first (paused ranks last): pause it
+	h.press("j", "p") // backup is paused: resume it
 	f := h.fakes["home"]
 	if !f.Sent(`["resumeMonitor",8]`) || !f.Sent(`["pauseMonitor",7]`) {
 		t.Fatalf("frames: %v", f.Frames())
 	}
-	if !strings.Contains(h.view(), "paused nextcloud") {
+	if !strings.Contains(h.view(), "resumed backup") {
 		t.Errorf("no flash:\n%s", h.view())
 	}
 	h.press("esc")
