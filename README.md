@@ -54,6 +54,17 @@ paused on its own. Deleting a group asks whether to keep its monitors.
 Tags are Kuma's too. `t` lists them, and a monitor's form ticks which it carries. `/` searches
 tag names and values as well as names and targets.
 
+### Monitor detail
+
+`enter` on a monitor opens it at full size:
+- its uptime over the last day, 30 days and year, its certificate, and its average ping
+- a chart of its pings over the last hour, 6 hours, day, 7 days or 30 days (`←`/`→` switch)
+- its latest beats
+- the history of its state changes, fetched from Kuma as you scroll
+
+The monitor keys work there too. `x` clears the messages of its past state changes, and `X`
+clears its uptime history, each after asking.
+
 Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
 token is tied to the URL it was issued for, not the name.
@@ -62,6 +73,7 @@ token is tied to the URL it was issued for, not the name.
 |---|---|
 | `↑/k` `↓/j` | move |
 | `enter` | open an instance, or log in to it |
+| `enter` on a monitor | open its detail |
 | `space`/`enter` on a group | fold or unfold it |
 | `n` | create a monitor, in the group under the cursor |
 | `g` | create a group |
