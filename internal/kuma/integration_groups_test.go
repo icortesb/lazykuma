@@ -10,8 +10,9 @@ import (
 
 // TestIntegrationGroupsAndTags checks, on a real Kuma, the group and tag
 // facts phase A is built on: a child names its group in parent, editMonitor
-// moves it, tags come back on the monitor, a clone is accepted by add, and
-// deleting a group can keep its monitors.
+// moves it, tags come back on the monitor, a clone is accepted by add (a
+// push clone with a token of its own), a group can be renamed and moved into
+// another, and deleting a group can keep its monitors.
 func TestIntegrationGroupsAndTags(t *testing.T) {
 	url := itEnv("LAZYKUMA_IT_URL", "http://localhost:3902")
 	user := itEnv("LAZYKUMA_IT_USER", "admin")
@@ -118,6 +119,46 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 		}
 	})
 
+	// A push clone gets a token of its own: add stores the one it is given.
+	pushID, err := s.AddMonitor(ctx, RawMonitor{
+		"type": "push", "name": "it-push", "pushToken": newPushToken(),
+		"interval": 60, "retryInterval": 60, "maxretries": 0,
+		"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
+		"conditions": []any{}, "kafkaProducerBrokers": []any{}, "kafkaProducerSaslOptions": map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("add push: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteMonitor(cctx, pushID); err != nil {
+			t.Logf("cleanup: delete push %d: %v", pushID, err)
+		}
+	})
+	pushSrc, err := s.GetMonitor(ctx, pushID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pushCloneID, err := s.AddMonitor(ctx, ForClone(pushSrc))
+	if err != nil {
+		t.Fatalf("clone push: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteMonitor(cctx, pushCloneID); err != nil {
+			t.Logf("cleanup: delete push clone %d: %v", pushCloneID, err)
+		}
+	})
+	pushClone, err := s.GetMonitor(ctx, pushCloneID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok, _ := pushClone["pushToken"].(string); tok == "" || tok == pushSrc["pushToken"] {
+		t.Fatalf("push clone token = %q, source %q", tok, pushSrc["pushToken"])
+	}
+
 	// A fresh session's monitor list shows the tree and the tag.
 	events := make(chan Event, 1024)
 	sup := NewSupervisor(url, func() string { return token }, func(ev Event) { events <- ev })
@@ -142,6 +183,39 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 		t.Fatalf("child tags = %+v", got)
 	}
 
+	// Rename the group and move it into another one, the way the UI edits
+	// a group: the whole monitor back, with a new name and parent.
+	outerID, err := s.AddMonitor(ctx, NewGroup("it-outer"))
+	if err != nil {
+		t.Fatalf("add outer group: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.DeleteGroup(cctx, outerID, false); err != nil {
+			t.Logf("cleanup: delete outer group %d: %v", outerID, err)
+		}
+	})
+	group, err := s.GetMonitor(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group["name"] = "it-group-renamed"
+	group["parent"] = float64(outerID)
+	if err := s.EditMonitor(ctx, group); err != nil {
+		t.Fatalf("rename and move group: %v", err)
+	}
+	group, err = s.GetMonitor(ctx, groupID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group["name"] != "it-group-renamed" || group["parent"] != float64(outerID) || group["type"] != "group" {
+		t.Fatalf("group after edit: name %v parent %v type %v", group["name"], group["parent"], group["type"])
+	}
+	if moved, err := s.GetMonitor(ctx, childID); err != nil || moved["parent"] != float64(groupID) {
+		t.Fatalf("child after its group moved: parent %v, %v", moved["parent"], err)
+	}
+
 	// Delete the group, keeping its monitors: they become loose.
 	if err := s.DeleteGroup(ctx, groupID, false); err != nil {
 		t.Fatalf("delete group: %v", err)
@@ -153,7 +227,7 @@ func TestIntegrationGroupsAndTags(t *testing.T) {
 	if after["parent"] != nil {
 		t.Fatalf("child parent after delete = %v", after["parent"])
 	}
-	// The rest of the cleanup (child, clone, tag, and a no-op retry of the
-	// group delete above) runs through t.Cleanup, registered next to each
+	// The rest of the cleanup (child, clones, push monitor, outer group, tag,
+	// and a no-op retry of the group delete above) runs through t.Cleanup, registered next to each
 	// object's creation, so it still runs if an assertion above t.Fatals.
 }

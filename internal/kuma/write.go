@@ -2,6 +2,7 @@ package kuma
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 )
@@ -182,9 +183,12 @@ var cloneDrops = []string{
 }
 
 // ForClone is a copy of a whole monitor that AddMonitor accepts as a new
-// one: same settings, same group, "copy of" its name. A push monitor gets
-// no token, so Kuma makes a new one rather than two monitors sharing a URL.
-// The tags are not in it: add ignores them, so the caller adds them after.
+// one: same settings, same group, "copy of" its name. A push monitor gets a
+// token of its own: Kuma's add stores whatever token it is given (the web UI
+// makes one in the browser), so keeping the source's would have two
+// monitors share a push URL, and dropping it would leave the clone without
+// one. The tags are not in it: add ignores them, so the caller adds them
+// after.
 func ForClone(m RawMonitor) RawMonitor {
 	out := make(RawMonitor, len(m))
 	for k, v := range m {
@@ -194,11 +198,38 @@ func ForClone(m RawMonitor) RawMonitor {
 		delete(out, k)
 	}
 	if out["type"] == "push" {
-		delete(out, "pushToken")
+		out["pushToken"] = newPushToken()
 	}
 	name, _ := m["name"].(string)
 	out["name"] = "copy of " + name
 	return out
+}
+
+// pushTokenChars and pushTokenLen match the tokens Kuma's web UI makes for a
+// push monitor, so a clone's push URL looks like any other.
+const (
+	pushTokenChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	pushTokenLen   = 32
+)
+
+// newPushToken is a random push token. The token is the only thing that
+// authenticates a push, so it comes from crypto/rand; rand.Text is not used
+// because its alphabet is not Kuma's. Bytes at or above the largest multiple
+// of the alphabet's length are skipped, so no character is likelier than
+// another. rand.Read never returns an error: it crashes the program instead.
+func newPushToken() string {
+	limit := byte(256 - 256%len(pushTokenChars))
+	out := make([]byte, 0, pushTokenLen)
+	var buf [pushTokenLen]byte
+	for len(out) < pushTokenLen {
+		rand.Read(buf[:])
+		for _, b := range buf {
+			if b < limit && len(out) < pushTokenLen {
+				out = append(out, pushTokenChars[int(b)%len(pushTokenChars)])
+			}
+		}
+	}
+	return string(out)
 }
 
 // DeleteGroup removes a group. withMonitors deletes the monitors in it, and

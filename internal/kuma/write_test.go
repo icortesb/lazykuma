@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -236,7 +237,7 @@ func TestForCloneDropsWhatAddCannotStore(t *testing.T) {
 		"notificationIDList": map[string]any{"5": true},
 	}
 	got := ForClone(src)
-	for _, k := range []string{"id", "includeSensitiveData", "maintenance", "childrenIDs", "forceInactive", "path", "pathName", "screenshot", "tags", "pushToken"} {
+	for _, k := range []string{"id", "includeSensitiveData", "maintenance", "childrenIDs", "forceInactive", "path", "pathName", "screenshot", "tags"} {
 		if _, ok := got[k]; ok {
 			t.Errorf("clone keeps %q", k)
 		}
@@ -244,8 +245,19 @@ func TestForCloneDropsWhatAddCannotStore(t *testing.T) {
 	if got["name"] != "copy of web" || got["parent"] != float64(1) || got["notificationIDList"] == nil {
 		t.Errorf("clone = %v", got)
 	}
-	if _, ok := src["id"]; !ok {
+	// A push clone needs a token of its own: add stores what it is given.
+	token, _ := got["pushToken"].(string)
+	if len(token) != 32 || token == src["pushToken"] || strings.Trim(token, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != "" {
+		t.Errorf("clone pushToken = %q", token)
+	}
+	if again, _ := ForClone(src)["pushToken"].(string); again == token {
+		t.Errorf("two clones share pushToken %q", token)
+	}
+	if _, ok := src["id"]; !ok || src["pushToken"] != "abc" {
 		t.Error("ForClone changed its argument")
+	}
+	if _, ok := ForClone(RawMonitor{"type": "http", "name": "web"})["pushToken"]; ok {
+		t.Error("an http clone got a pushToken")
 	}
 }
 
