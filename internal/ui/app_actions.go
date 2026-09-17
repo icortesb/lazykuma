@@ -121,10 +121,10 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					question: fmt.Sprintf("Delete %s and its %s?", g.Name, monitors(countMonitors(m.current().st, g))),
 					detail:   "Kuma removes every monitor in the group and all of their history",
 				}
-				m.onYes, m.backTo, m.screen = deleteGroup(m.current().inst, g, true), screenInstance, screenConfirm
+				m.onYes, m.screen = deleteGroup(m.current().inst, g, true), screenConfirm
 				return m, nil
 			}
-			m.screen = screenInstance
+			m.screen = m.backTo
 		}
 	}
 	return m, nil
@@ -365,12 +365,12 @@ func (m Model) updateIncidents(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // loadMonitor fetches the whole monitor: Kuma replaces a monitor with what
 // an edit sends, so an edit must start from everything it holds.
-func loadMonitor(in *core.Instance, id int, mode loadMode) tea.Cmd {
+func loadMonitor(in *core.Instance, id int, mode loadMode, from screen) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		mon, err := in.GetMonitor(ctx, id)
-		return monitorLoaded{instance: in.Name(), mon: mon, mode: mode, err: err}
+		return monitorLoaded{instance: in.Name(), mon: mon, mode: mode, from: from, err: err}
 	}
 }
 

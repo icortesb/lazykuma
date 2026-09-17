@@ -260,7 +260,7 @@ func TestALateMonitorFromAnotherInstanceIsIgnored(t *testing.T) {
 	h := onInstance(t, twoMonitors())
 	// The answer to a fetch the user started on another instance arrives
 	// after they moved here: opening it would edit the wrong instance.
-	h.send(monitorLoaded{instance: "elsewhere", mon: kuma.RawMonitor{"id": float64(1), "type": "http", "name": "x"}})
+	h.send(monitorLoaded{instance: "elsewhere", from: screenInstance, mon: kuma.RawMonitor{"id": float64(1), "type": "http", "name": "x"}})
 	if h.m.screen != screenInstance {
 		t.Fatalf("a foreign monitor opened screen %v", h.m.screen)
 	}

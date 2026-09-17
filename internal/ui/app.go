@@ -151,6 +151,7 @@ type (
 		instance string // which instance asked: the user can move on
 		mon      kuma.RawMonitor
 		mode     loadMode
+		from     screen // where the fetch was asked from, and where its form returns
 		err      error
 	}
 	flashMsg      struct{ text string }
@@ -247,14 +248,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
 		}
-		if m.screen != screenInstance || m.current().name() != msg.instance {
+		if m.screen != msg.from || m.current().name() != msg.instance {
 			// The user moved on while Kuma was answering; an edit opened now
 			// would save one instance's monitor into another.
 			return m, nil
 		}
 		if msg.mode == loadRaw {
 			m.raw = newRawEditor("monitor", 0, msg.mon)
-			m.backTo, m.screen = screenInstance, screenRaw
+			m.backTo, m.screen = msg.from, screenRaw
 			return m, nil
 		}
 		kind, _ := msg.mon["type"].(string)
@@ -269,7 +270,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.mode == loadClone {
 				m.raw.cloneTags = rawTags(msg.mon["tags"])
 			}
-			m.backTo, m.screen = screenInstance, screenRaw
+			m.backTo, m.screen = msg.from, screenRaw
 			return m, nil
 		}
 		lists := m.formLists(0, true)
@@ -278,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.mform = editMonitorForm(msg.mon, lists)
 		}
-		m.backTo, m.screen = screenInstance, screenMonitor
+		m.backTo, m.screen = msg.from, screenMonitor
 		return m, nil
 
 	case loginDone:
@@ -418,26 +419,10 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch act {
 	case instBack:
 		m.screen = screenMenu
-	case instToggle:
-		if !hasRow {
-			break
+	case instToggle, instEdit, instRaw, instClone, instDelete, instSilence, instMove:
+		if hasRow {
+			return m.actOn(act, row, screenInstance)
 		}
-		if row.Group {
-			verb, detail := "Pause", "Kuma stops checking every monitor in the group until it is resumed"
-			if !row.Active {
-				verb, detail = "Resume", "every monitor in the group is resumed, including any paused on its own"
-			}
-			m.ask = confirm{
-				question: fmt.Sprintf("%s %s and its %s?", verb, row.Name, monitors(row.Children)),
-				detail:   detail,
-			}
-			// The ids are taken now: the group can change while the question
-			// is on screen, and the answer is to what was asked.
-			ids := coveredBy(in.st, row.Monitor)
-			m.onYes, m.backTo, m.screen = toggleGroup(in.inst, row.Monitor, ids), screenInstance, screenConfirm
-			break
-		}
-		cmd = togglePause(in.inst, row.Monitor)
 	case instNew:
 		options := make([]option, 0, len(curatedKinds)+1)
 		for _, k := range curatedKinds {
@@ -446,56 +431,9 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		options = append(options, option{"Other type…", "other"})
 		m.pick = newPicker("New monitor", "what should it watch?", options)
 		m.picking, m.backTo, m.screen = "monitor", screenInstance, screenPick
-	case instEdit:
-		if hasRow && row.Group {
-			m.nform = newNameForm("Rename group", "", row.Name, row.ID)
-			m.backTo, m.screen = screenInstance, screenName
-			break
-		}
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadEdit)
-		}
-	case instRaw:
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadRaw)
-		}
-	case instClone:
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadClone)
-		}
-	case instDelete:
-		if !hasRow {
-			break
-		}
-		if row.Group {
-			m.moving = row.Monitor
-			m.pick = newPicker("Delete group "+row.Name, "", []option{
-				{fmt.Sprintf("Delete the group, keep its %s", monitors(row.Children)), "keep"},
-				{fmt.Sprintf("Delete the group and its %s", monitors(row.Children)), "all"},
-				{"Cancel", "cancel"},
-			})
-			m.picking, m.backTo, m.screen = "delgroup", screenInstance, screenPick
-			break
-		}
-		m.ask = confirm{
-			question: fmt.Sprintf("Delete %q?", row.Name),
-			detail:   "Kuma removes the monitor and all of its history",
-		}
-		m.onYes, m.backTo, m.screen = deleteMonitor(in.inst, row.Monitor), screenInstance, screenConfirm
-	case instSilence:
-		if hasRow {
-			m.silence = newSilenceForm(row.Monitor, coveredBy(in.st, row.Monitor))
-			m.backTo, m.screen = screenInstance, screenSilence
-		}
 	case instNewGroup:
 		m.nform = newNameForm("New group", "monitors move into it with v", "", 0)
 		m.backTo, m.screen = screenInstance, screenName
-	case instMove:
-		if hasRow {
-			m.moving = row.Monitor
-			m.pick = newPicker("Move "+row.Name, "into which group?", groupOptions(in.st, row.Monitor))
-			m.picking, m.backTo, m.screen = "move", screenInstance, screenPick
-		}
 	case instSilenced:
 		m.silenced, m.screen = maintenanceScreen{}, screenSilenced
 	case instChannels:
