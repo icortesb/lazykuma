@@ -61,13 +61,17 @@ const (
 // Monitor is a Kuma monitor with what the server has said about it.
 type Monitor struct {
 	kuma.Monitor
-	Beats      []kuma.Beat // oldest first, at most beatsKept
-	Uptime24   float64     // 0 to 1
-	HasUptime  bool
-	AvgPing    float64
-	HasAvgPing bool
-	CertDays   int
-	HasCert    bool
+	Beats        []kuma.Beat // oldest first, at most beatsKept
+	Uptime24     float64     // 0 to 1
+	HasUptime    bool
+	Uptime30d    float64 // 0 to 1, over the last 720 hours
+	HasUptime30d bool
+	Uptime1y     float64 // 0 to 1, over the last year
+	HasUptime1y  bool
+	AvgPing      float64
+	HasAvgPing   bool
+	CertDays     int
+	HasCert      bool
 }
 
 // Last is the latest heartbeat.
@@ -216,8 +220,20 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 	case kuma.AvgPing:
 		in = update(in, ev.MonitorID, func(m *Monitor) { m.AvgPing, m.HasAvgPing = ev.Ms, ev.Valid })
 	case kuma.Uptime:
-		if ev.Period == "24" {
-			in = update(in, ev.MonitorID, func(m *Monitor) { m.Uptime24, m.HasUptime = ev.Ratio, true })
+		// Only the periods Kuma sends: update creates a monitor it has not
+		// seen, and an unknown period is no reason to.
+		switch ev.Period {
+		case "24", "720", "1y":
+			in = update(in, ev.MonitorID, func(m *Monitor) {
+				switch ev.Period {
+				case "24":
+					m.Uptime24, m.HasUptime = ev.Ratio, true
+				case "720":
+					m.Uptime30d, m.HasUptime30d = ev.Ratio, true
+				case "1y":
+					m.Uptime1y, m.HasUptime1y = ev.Ratio, true
+				}
+			})
 		}
 	case kuma.NotificationList:
 		in.Channels = ev.Notifications

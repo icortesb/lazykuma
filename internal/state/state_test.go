@@ -77,6 +77,18 @@ func TestReplayRealSession(t *testing.T) {
 	}
 }
 
+func TestUptimePeriods(t *testing.T) {
+	in := Apply(Instance{}, kuma.Connected{}, t0)
+	in = Apply(in, kuma.MonitorList{Monitors: map[int]kuma.Monitor{1: {ID: 1, Name: "web", Active: true}}}, t0)
+	for period, ratio := range map[string]float64{"24": 1, "720": 0.998, "1y": 0.9991} {
+		in = Apply(in, kuma.Uptime{MonitorID: 1, Period: period, Ratio: ratio}, t0)
+	}
+	m := in.Monitors[1]
+	if !m.HasUptime || m.Uptime24 != 1 || !m.HasUptime30d || m.Uptime30d != 0.998 || !m.HasUptime1y || m.Uptime1y != 0.9991 {
+		t.Fatalf("monitor = %+v", m)
+	}
+}
+
 func TestPauseShowsThroughUpdate(t *testing.T) {
 	in := replay(t, Instance{}, "monitorList", "heartbeatList")
 	beats := len(in.Monitors[1].Beats)

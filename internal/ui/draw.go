@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -107,6 +108,70 @@ func beatBar(beats []kuma.Beat, width int) string {
 		sb.WriteString(st.Render("█"))
 	}
 	return sb.String()
+}
+
+// chartLine draws a monitor's history in width cells, newest on the right.
+// A cell's height is its average ping between the lowest and highest in the
+// line; a cell with only down checks sits at the bottom in red, and one with
+// some down checks is drawn in the warning colour. Neighbouring points merge
+// when there are more than cells. ok is false when no check was up, so
+// there is no ping range to speak of.
+func chartLine(points []kuma.ChartPoint, width int) (line string, lo, hi float64, ok bool) {
+	if width <= 0 || len(points) == 0 {
+		return "", 0, 0, false
+	}
+	type cell struct {
+		up, down int
+		ping     float64 // sum of avgPing × up, divided by up once merged
+	}
+	n := min(len(points), width)
+	cells := make([]cell, n)
+	for i, p := range points {
+		c := &cells[i*n/len(points)]
+		c.up += p.Up
+		c.down += p.Down
+		c.ping += p.AvgPing * float64(p.Up)
+	}
+	for i := range cells {
+		if cells[i].up == 0 {
+			continue
+		}
+		cells[i].ping /= float64(cells[i].up)
+		if !ok || cells[i].ping < lo {
+			lo = cells[i].ping
+		}
+		if !ok || cells[i].ping > hi {
+			hi = cells[i].ping
+		}
+		ok = true
+	}
+	var sb strings.Builder
+	for _, c := range cells {
+		if c.up == 0 {
+			sb.WriteString(styleErr.Render(string(sparks[0])))
+			continue
+		}
+		i := 0
+		if hi > lo {
+			i = int((c.ping - lo) / (hi - lo) * float64(len(sparks)-1))
+		}
+		style := styleHeading
+		if c.down > 0 {
+			style = styleWarn
+		}
+		sb.WriteString(style.Render(string(sparks[i])))
+	}
+	return sb.String(), lo, hi, ok
+}
+
+// pct is an uptime ratio as the detail shows it, or a dash when Kuma has
+// not said.
+func pct(ratio float64, has bool) string {
+	if !has {
+		return "—"
+	}
+	s := strconv.FormatFloat(ratio*100, 'f', 1, 64)
+	return strings.TrimSuffix(s, ".0") + "%"
 }
 
 // ms is a ping for the list and the detail.
