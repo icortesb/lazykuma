@@ -2,6 +2,7 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -226,19 +227,10 @@ func TestDetailIgnoresLateAnswers(t *testing.T) {
 func TestDetailRefetchesWhatWasCleared(t *testing.T) {
 	h := toDetail(t)
 	h.press("l", "x", "y") // 7d, then clear its events
-	count := func(want string) int {
-		n := 0
-		for _, fr := range h.fakes["home"].Frames() {
-			if strings.Contains(fr, want) {
-				n++
-			}
-		}
-		return n
-	}
-	if got := count(`["monitorImportantHeartbeatListPaged",2,0,25]`); got != 2 {
+	if got := h.count("home", `["monitorImportantHeartbeatListPaged",2,0,25]`); got != 2 {
 		t.Errorf("first page asked %d times, want 2", got)
 	}
-	if got := count(`["getMonitorChartData",2,168]`); got != 2 {
+	if got := h.count("home", `["getMonitorChartData",2,168]`); got != 2 {
 		t.Errorf("7d chart asked %d times, want 2", got)
 	}
 	if v := h.view(); !strings.Contains(v, "ping · 7d") || !strings.Contains(v, "connect ETIMEDOUT") {
@@ -345,5 +337,170 @@ func TestDetailShowsAFailedPage(t *testing.T) {
 	d = d.withEvents(eventsLoaded{monitorID: 2, offset: 1, beats: []kuma.Beat{{MonitorID: 2, Time: tBase.Add(-time.Hour), Msg: "connect ETIMEDOUT"}}})
 	if v := d.View(st, 80, 30); strings.Contains(v, "timeout") {
 		t.Errorf("error kept after a page loaded:\n%s", v)
+	}
+}
+
+// count is how many frames sent to the instance's fake Kuma contain want.
+func (h *harness) count(name, want string) int {
+	n := 0
+	for _, fr := range h.fakes[name].Frames() {
+		if strings.Contains(fr, want) {
+			n++
+		}
+	}
+	return n
+}
+
+// A detail kept open through a lost connection says its data is stale, and
+// once the session is back it fetches again what it could not while down.
+func TestDetailThroughALostConnection(t *testing.T) {
+	h := toDetail(t)
+	down := state.Apply(h.m.current().st, kuma.Disconnected{Err: errors.New("dial tcp: connection refused")}, tBase.Add(time.Hour))
+	h.state("home", down)
+	v := h.view()
+	if !strings.Contains(v, "stale since") || !strings.Contains(v, "· down") {
+		t.Fatalf("no stale note on the detail:\n%s", v)
+	}
+	assertFits(t, v, 120)
+	for _, width := range []int{60, 30, 12} {
+		assertFits(t, h.m.detail.View(down, width, 30), width)
+	}
+	// A period switched to while down could not be fetched.
+	h.press("l")
+	h.send(chartLoaded{instance: "home", monitorID: 2, hours: 168, err: fmt.Errorf("chart: %w", kuma.ErrNotConnected)})
+	if !strings.Contains(h.view(), "not connected") {
+		t.Fatalf("no chart error:\n%s", h.view())
+	}
+	charts := h.count("home", `["getMonitorChartData",2,168]`)
+	pages := h.count("home", `["monitorImportantHeartbeatListPaged",2,0,25]`)
+
+	h.state("home", state.Apply(down, kuma.Connected{}, tBase.Add(2*time.Hour)))
+	if got := h.count("home", `["getMonitorChartData",2,168]`); got != charts+1 {
+		t.Errorf("7d chart asked %d times after reconnecting, want %d", got, charts+1)
+	}
+	if got := h.count("home", `["monitorImportantHeartbeatListPaged",2,0,25]`); got != pages+1 {
+		t.Errorf("first page asked %d times after reconnecting, want %d", got, pages+1)
+	}
+	v = h.view()
+	if strings.Contains(v, "not connected") || strings.Contains(v, "stale since") {
+		t.Errorf("still stale after reconnecting:\n%s", v)
+	}
+	if !strings.Contains(v, "ping · 7d") || !strings.Contains(v, "max 410ms") || !strings.Contains(v, "connect ETIMEDOUT") {
+		t.Errorf("not fetched again:\n%s", v)
+	}
+}
+
+// A detail left before the session came back has nothing on screen to fetch
+// for.
+func TestDetailLeftBeforeAReconnectIsNotFetched(t *testing.T) {
+	h := toDetail(t)
+	h.press("x", "n", "esc") // a question opened from the detail, then back to the list
+	down := state.Apply(h.m.current().st, kuma.Disconnected{Err: errors.New("dial tcp: connection refused")}, tBase.Add(time.Hour))
+	h.state("home", down)
+	before := h.count("home", "getMonitorChartData")
+	h.state("home", state.Apply(down, kuma.Connected{}, tBase.Add(2*time.Hour)))
+	if got := h.count("home", "getMonitorChartData"); got != before {
+		t.Errorf("chart fetched for a detail left behind: %v", h.fakes["home"].Frames())
+	}
+}
+
+// A clear that finishes after the user left the detail does not fetch for
+// it: it is built afresh when opened again.
+func TestDetailLeftBeforeAClearFinishedIsNotFetched(t *testing.T) {
+	h := toDetail(t)
+	h.press("x")
+	next, clear := h.m.Update(keyMsg("y")) // the clear is held back
+	h.m = next.(Model)
+	h.press("esc")
+	if h.m.screen != screenInstance {
+		t.Fatalf("esc did not leave the detail: %v", h.m.screen)
+	}
+	before := len(h.fakes["home"].Frames())
+	h.run(clear)
+	frames := h.fakes["home"].Frames()
+	if !h.fakes["home"].Sent(`["clearEvents",2]`) {
+		t.Fatalf("clear not sent: %v", frames)
+	}
+	for _, fr := range frames[before:] {
+		if strings.Contains(fr, "getMonitorChartData") || strings.Contains(fr, "monitorImportantHeartbeatListPaged") {
+			t.Errorf("fetched for a detail left behind: %s", fr)
+		}
+	}
+}
+
+// An edit asked for on one detail and answered once the user is on another
+// must not open: it would edit a monitor other than the one on screen.
+func TestDetailDropsAnEditForAnotherMonitor(t *testing.T) {
+	h := onInstance(t, withMonitors(map[int]kuma.Monitor{
+		2: {ID: 2, Name: "web", URL: "https://shop.example.com", Active: true},
+		3: {ID: 3, Name: "api", URL: "https://api.example.com", Active: true},
+	}))
+	h.press("enter")
+	first := h.m.detail.id
+	next, edit := h.m.Update(keyMsg("e")) // the fetch is held back
+	h.m = next.(Model)
+	h.press("esc", "j", "enter")
+	if h.m.screen != screenDetail || h.m.detail.id == first {
+		t.Fatalf("not on the other detail: screen %v, id %d", h.m.screen, h.m.detail.id)
+	}
+	h.run(edit)
+	if h.m.screen != screenDetail {
+		t.Fatalf("the first monitor's edit opened on the second's detail: %v\n%s", h.m.screen, h.view())
+	}
+}
+
+func TestDetailMoveAndSilenceReturnToTheDetail(t *testing.T) {
+	h := toDetail(t)
+	h.press("v")
+	if h.m.screen != screenPick || !strings.Contains(h.view(), "Move web") {
+		t.Fatalf("v did not open the move picker:\n%s", h.view())
+	}
+	h.press("esc")
+	if h.m.screen != screenDetail {
+		t.Fatalf("esc from the move picker went to %v", h.m.screen)
+	}
+	h.press("m")
+	if h.m.screen != screenSilence {
+		t.Fatalf("m did not open the silence form:\n%s", h.view())
+	}
+	h.press("esc")
+	if h.m.screen != screenDetail {
+		t.Fatalf("esc from the silence form went to %v", h.m.screen)
+	}
+}
+
+// A delete from the detail stays on it until the instance says the monitor
+// is gone, whichever lands first.
+func TestDetailDeleteLeavesOnceTheMonitorIsGone(t *testing.T) {
+	h := toDetail(t)
+	h.press("d")
+	if !strings.Contains(h.view(), `Delete "web"?`) {
+		t.Fatalf("no delete question:\n%s", h.view())
+	}
+	h.press("y") // Kuma answers before the instance hears of it
+	if !h.fakes["home"].Sent(`["deleteMonitor",2]`) {
+		t.Fatalf("delete not sent: %v", h.fakes["home"].Frames())
+	}
+	if h.m.screen != screenDetail {
+		t.Fatalf("left before the monitor was gone: %v", h.m.screen)
+	}
+	h.state("home", state.Apply(h.m.current().st, kuma.MonitorDeleted{ID: 2}, tBase))
+	if h.m.screen != screenInstance {
+		t.Fatalf("still on the detail of a deleted monitor: %v", h.m.screen)
+	}
+}
+
+// A monitor deleted while a form opened from its detail is on screen: the
+// form's result does not return to a detail with nothing to show.
+func TestDetailFormFinishedAfterTheMonitorWentLeaves(t *testing.T) {
+	h := toDetail(t)
+	h.press("m")
+	h.state("home", state.Apply(h.m.current().st, kuma.MonitorDeleted{ID: 2}, tBase))
+	if h.m.screen != screenSilence {
+		t.Fatalf("the form was closed under the user: %v", h.m.screen)
+	}
+	h.send(actionDone{name: "home", action: "silenced", mon: "web"})
+	if h.m.screen != screenInstance {
+		t.Fatalf("returned to the detail of a deleted monitor: %v", h.m.screen)
 	}
 }

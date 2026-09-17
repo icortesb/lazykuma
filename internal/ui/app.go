@@ -154,6 +154,7 @@ type (
 	// or the field editor.
 	monitorLoaded struct {
 		instance string // which instance asked: the user can move on
+		id       int    // which monitor was asked for
 		mon      kuma.RawMonitor
 		mode     loadMode
 		from     screen // where the fetch was asked from, and where its form returns
@@ -219,7 +220,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// up yet when the instance opened could not answer: ask again once
 		// it is, or a clone made now would find no tags to copy.
 		if i == m.cur && m.screen != screenMenu && msg.State.Conn == state.ConnOK && prev.Conn != state.ConnOK {
-			return m, loadTags(m.insts[i].inst)
+			tags := loadTags(m.insts[i].inst)
+			// A detail open through the outage could fetch nothing while it
+			// lasted, and missed the state changes of its duration: fetch its
+			// chart and its events again, for the period on screen.
+			if _, ok := msg.State.Monitors[m.detail.id]; ok && m.onDetail() {
+				var fetch tea.Cmd
+				m.detail, fetch = m.refreshDetail()
+				return m, tea.Batch(tags, fetch)
+			}
+			return m, tags
 		}
 		return m, nil
 
@@ -244,14 +254,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.screen = screenInstance
 			}
 		}
-		if strings.HasPrefix(msg.action, "cleared") && msg.name == m.current().name() && msg.monitorID == m.detail.id {
-			// What was cleared is fetched again, for the period on screen.
-			// It is fetched whatever is on screen now: a form opened from the
-			// detail meanwhile returns to it.
-			in, id, period := m.current(), m.detail.id, m.detail.period
-			m.detail = newDetailScreen(id, in.st)
-			m.detail.period = period
-			return m, tea.Batch(done, loadChart(in.inst, id, chartPeriods[period].hours), loadEvents(in.inst, id, 0))
+		if strings.HasPrefix(msg.action, "cleared") && msg.name == m.current().name() && msg.monitorID == m.detail.id && m.onDetail() {
+			// What was cleared is fetched again, for the period on screen,
+			// while the user is still on that detail: a form opened from it
+			// meanwhile returns to it. One left behind is built afresh when
+			// opened again.
+			var fetch tea.Cmd
+			m.detail, fetch = m.refreshDetail()
+			return m, tea.Batch(done, fetch)
 		}
 		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
 			return m, tea.Batch(done, loadTags(m.current().inst))
@@ -274,9 +284,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
 		}
-		if m.screen != msg.from || m.current().name() != msg.instance {
+		if m.screen != msg.from || m.current().name() != msg.instance || (msg.from == screenDetail && m.detail.id != msg.id) {
 			// The user moved on while Kuma was answering; an edit opened now
-			// would save one instance's monitor into another.
+			// would save one instance's monitor into another, or open over
+			// the detail of another monitor.
 			return m, nil
 		}
 		if msg.mode == loadRaw {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kuma"
@@ -183,7 +184,15 @@ func (d detailScreen) View(st state.Instance, width, height int) string {
 	}
 	var lines []string
 
-	lines = append(lines, styleHeading.Render(truncate(m.Name, width-16))+"   "+statusWord(m.Status()))
+	title := styleHeading.Render(truncate(m.Name, width-16)) + "   " + statusWord(m.Status())
+	// The status and everything below are as they were when the connection
+	// was lost, like the list says of them.
+	if note := staleNote(st); note != "" {
+		if room := width - lipgloss.Width(title) - 3; room > 0 {
+			title += "   " + styleWarn.Render(truncate(note, room))
+		}
+	}
+	lines = append(lines, title)
 	facts := []string{m.Target(), m.Type}
 	if m.Interval > 0 {
 		facts = append(facts, fmt.Sprintf("every %ds", m.Interval))

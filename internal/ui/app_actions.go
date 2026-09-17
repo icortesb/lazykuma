@@ -371,7 +371,7 @@ func loadMonitor(in *core.Instance, id int, mode loadMode, from screen) tea.Cmd 
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		mon, err := in.GetMonitor(ctx, id)
-		return monitorLoaded{instance: in.Name(), mon: mon, mode: mode, from: from, err: err}
+		return monitorLoaded{instance: in.Name(), id: id, mon: mon, mode: mode, from: from, err: err}
 	}
 }
 
@@ -476,6 +476,29 @@ func endSilence(in *core.Instance, w kuma.Maintenance) tea.Cmd {
 		defer cancel()
 		return actionDone{name: in.Name(), action: "ended", mon: w.Title, err: in.DeleteMaintenance(ctx, w.ID)}
 	}
+}
+
+// onDetail is whether the user is on the monitor's detail: on it, or on a
+// form, picker, question or help opened from it, which return there.
+func (m Model) onDetail() bool {
+	switch m.screen {
+	case screenDetail:
+		return true
+	case screenHelp:
+		return m.back == screenDetail
+	case screenPick, screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag:
+		return m.backTo == screenDetail
+	}
+	return false
+}
+
+// refreshDetail builds the detail afresh, on the period it shows, and
+// fetches its chart and its first page of events again.
+func (m Model) refreshDetail() (detailScreen, tea.Cmd) {
+	in, id, period := m.current(), m.detail.id, m.detail.period
+	d := newDetailScreen(id, in.st)
+	d.period = period
+	return d, tea.Batch(loadChart(in.inst, id, chartPeriods[period].hours), loadEvents(in.inst, id, 0))
 }
 
 func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

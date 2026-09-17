@@ -244,6 +244,19 @@ func (s instanceScreen) View(name string, st state.Instance, width, height int) 
 // than watch.
 const keyHints = "n new   enter detail   g group   e edit   d delete   v move   C clone   r fields   p pause   space fold   m silence   M silenced   t tags   c channels   i incidents   / search   f show   s sort   esc menu"
 
+// staleNote says the instance's data is not live, and since when, or is
+// empty while it is connected.
+func staleNote(st state.Instance) string {
+	if st.Conn == state.ConnOK {
+		return ""
+	}
+	note := st.Conn.String()
+	if !st.StaleSince.IsZero() {
+		note = fmt.Sprintf("stale since %s · %s", st.StaleSince.Local().Format("15:04"), note)
+	}
+	return note
+}
+
 func (s instanceScreen) header(name string, st state.Instance) string {
 	c := st.Counts()
 	parts := []string{
@@ -265,11 +278,7 @@ func (s instanceScreen) header(name string, st state.Instance) string {
 	}
 	line := strings.Join(parts, styleLabel.Render(" · "))
 
-	if st.Conn != state.ConnOK {
-		note := st.Conn.String()
-		if !st.StaleSince.IsZero() {
-			note = fmt.Sprintf("stale since %s · %s", st.StaleSince.Local().Format("15:04"), note)
-		}
+	if note := staleNote(st); note != "" {
 		line += "   " + styleWarn.Render(note)
 	}
 	if s.filtering || s.filter.Value() != "" {
