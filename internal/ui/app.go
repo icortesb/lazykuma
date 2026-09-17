@@ -141,6 +141,9 @@ type (
 		// monitor whose tags failed: the form must close all the same, or a
 		// retry would create the monitor a second time.
 		saved bool
+		// monitorID is the monitor a clear was for, so the detail refetches
+		// only its own history.
+		monitorID int
 	}
 	loginDone struct {
 		name  string
@@ -239,13 +242,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == screenDetail {
 			if _, ok := m.current().st.Monitors[m.detail.id]; !ok {
 				m.screen = screenInstance
-			} else if strings.HasPrefix(msg.action, "cleared") {
-				// What was cleared is fetched again, for the period on screen.
-				id, period := m.detail.id, m.detail.period
-				m.detail = newDetailScreen(id)
-				m.detail.period = period
-				return m, tea.Batch(done, loadChart(m.current().inst, id, chartPeriods[period].hours), loadEvents(m.current().inst, id, 0))
 			}
+		}
+		if strings.HasPrefix(msg.action, "cleared") && msg.name == m.current().name() && msg.monitorID == m.detail.id {
+			// What was cleared is fetched again, for the period on screen.
+			// It is fetched whatever is on screen now: a form opened from the
+			// detail meanwhile returns to it.
+			in, id, period := m.current(), m.detail.id, m.detail.period
+			m.detail = newDetailScreen(id, in.st)
+			m.detail.period = period
+			return m, tea.Batch(done, loadChart(in.inst, id, chartPeriods[period].hours), loadEvents(in.inst, id, 0))
 		}
 		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
 			return m, tea.Batch(done, loadTags(m.current().inst))
@@ -302,13 +308,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.backTo, m.screen = msg.from, screenMonitor
 		return m, nil
 
+	// The detail takes its answers whatever is on screen: a question or a
+	// form opened from it before they landed returns to it, and it must not
+	// be left loading. It drops those for another monitor, period or page.
 	case chartLoaded:
-		if m.screen == screenDetail && m.current().name() == msg.instance {
+		if m.current().name() == msg.instance {
 			m.detail = m.detail.withChart(msg)
 		}
 		return m, nil
 	case eventsLoaded:
-		if m.screen == screenDetail && m.current().name() == msg.instance {
+		if m.current().name() == msg.instance {
 			m.detail = m.detail.withEvents(msg)
 		}
 		return m, nil
@@ -478,7 +487,7 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd = loadTags(in.inst)
 	case instDetail:
 		if hasRow {
-			m.detail, m.screen = newDetailScreen(row.ID), screenDetail
+			m.detail, m.screen = newDetailScreen(row.ID, in.st), screenDetail
 			hours := chartPeriods[m.detail.period].hours
 			return m, tea.Batch(loadChart(in.inst, row.ID, hours), loadEvents(in.inst, row.ID, 0))
 		}

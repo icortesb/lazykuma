@@ -429,7 +429,7 @@ func TestHelpListsTheInstanceKeys(t *testing.T) {
 	v := h.view()
 	// The help is built from the same line the instance screen shows, so
 	// the two cannot drift apart.
-	for _, want := range []string{"n new", "d delete", "space fold", "m silence", "c channels", "i incidents", "enter detail", "On a monitor's detail", "x clear events", "X clear history", "ctrl+s save", "never written here"} {
+	for _, want := range []string{"n new", "d delete", "space fold", "m silence", "c channels", "i incidents", "enter detail", "On a monitor's detail", "x clear events", "X clear history", "r fields", "ctrl+s save", "never written here"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("help lacks %q:\n%s", want, v)
 		}

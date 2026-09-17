@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/icortesb/lazykuma/internal/core"
@@ -482,6 +483,10 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	mon, ok := in.st.Monitors[m.detail.id]
 	if !ok {
 		m.screen = screenInstance
+		return m, nil
+	}
+	if key.Matches(msg, keys.Help) {
+		m.back, m.screen = screenDetail, screenHelp
 		return m, nil
 	}
 	var act detailAction

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -178,7 +179,7 @@ func TestDetailFitsWithOrWithoutHistory(t *testing.T) {
 		MonitorID: 2, Status: kuma.StatusDown, Important: true, Time: tBase.Add(time.Hour),
 		Msg: strings.Repeat("a long reason from the far side ", 8),
 	}}, tBase.Add(time.Hour))
-	loading := newDetailScreen(2)
+	loading := newDetailScreen(2, detailed()) // opened before the long reason came in
 	loaded := loading.withChart(chartLoaded{monitorID: 2, hours: 24, points: []kuma.ChartPoint{
 		{Time: tBase, Up: 3, AvgPing: 40, MinPing: 30, MaxPing: 50},
 		{Time: tBase.Add(time.Minute), Down: 2},
@@ -242,5 +243,107 @@ func TestDetailRefetchesWhatWasCleared(t *testing.T) {
 	}
 	if v := h.view(); !strings.Contains(v, "ping · 7d") || !strings.Contains(v, "connect ETIMEDOUT") {
 		t.Errorf("after the clear:\n%s", v)
+	}
+}
+
+// Answers that land while a question opened from the detail is on screen
+// still reach it: back on the detail it is not left loading, and paging
+// goes on.
+func TestDetailTakesAnswersThatLandUnderAQuestion(t *testing.T) {
+	h := onInstance(t, detailed())
+	h.press("j")
+	next, fetch := h.m.Update(keyMsg("enter")) // the fetches are held back
+	h.m = next.(Model)
+	h.press("x")
+	if h.m.screen != screenConfirm {
+		t.Fatalf("x did not ask:\n%s", h.view())
+	}
+	h.run(fetch) // they land under the question
+	h.press("n")
+	if h.m.screen != screenDetail || h.m.detail.chartLoading || h.m.detail.eventsLoading {
+		t.Fatalf("screen %v, chart loading %v, events loading %v", h.m.screen, h.m.detail.chartLoading, h.m.detail.eventsLoading)
+	}
+	if v := h.view(); !strings.Contains(v, "max 410ms") || !strings.Contains(v, "connect ETIMEDOUT") {
+		t.Fatalf("answers lost:\n%s", v)
+	}
+	for i := 0; i < 24; i++ {
+		h.press("j")
+	}
+	if !h.fakes["home"].Sent(`["monitorImportantHeartbeatListPaged",2,25,25]`) {
+		t.Errorf("paging stopped: %v", h.fakes["home"].Frames())
+	}
+}
+
+// important is a state change the instance saw, as Kuma reports it.
+func important(st state.Instance, at time.Time, status kuma.Status, msg string) state.Instance {
+	return state.Apply(st, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: 2, Status: status, Important: true, Msg: msg, Time: at}}, at)
+}
+
+// The state changes the instance already held when the detail opened are
+// Kuma's to list: they show once, from the fetched page, or not at all.
+func TestDetailLeavesOlderStateChangesToThePages(t *testing.T) {
+	st := detailed()
+	st = important(st, time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC), kuma.StatusUp, "200 - OK") // also on the page
+	st = important(st, time.Date(2026, 9, 16, 13, 0, 0, 0, time.UTC), kuma.StatusDown, "an outage held in memory")
+	h := onInstance(t, st)
+	h.press("j", "enter")
+	if v := h.view(); strings.Contains(v, "an outage held in memory") {
+		t.Errorf("an in-memory change shown:\n%s", v)
+	}
+	if got := len(h.m.detail.shown(h.m.current().st)); got != eventPage {
+		t.Errorf("shown %d, want the %d fetched", got, eventPage)
+	}
+}
+
+// Clearing the events must not leave the ones the instance keeps in memory
+// on screen, as if nothing happened.
+func TestDetailClearEventsDropsTheInMemoryOnes(t *testing.T) {
+	h := toDetail(t)
+	h.state("home", important(h.m.current().st, time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC), kuma.StatusDown, "certificate has expired"))
+	if !strings.Contains(h.view(), "certificate has expired") {
+		t.Fatalf("live change missing:\n%s", h.view())
+	}
+	h.press("x", "y")
+	if v := h.view(); strings.Contains(v, "certificate has expired") {
+		t.Errorf("still shown after the clear:\n%s", v)
+	}
+}
+
+// A clear of another monitor, finished while this detail is open, leaves
+// this one's history alone.
+func TestDetailRefetchesOnlyItsOwnClear(t *testing.T) {
+	h := toDetail(t)
+	before := len(h.fakes["home"].Frames())
+	h.send(actionDone{name: "home", action: "cleared the events of", mon: "other", monitorID: 99})
+	if after := len(h.fakes["home"].Frames()); after != before {
+		t.Errorf("fetched for another monitor's clear: %v", h.fakes["home"].Frames()[before:])
+	}
+}
+
+func TestDetailHelpReturnsToTheDetail(t *testing.T) {
+	h := toDetail(t)
+	h.press("?")
+	if h.m.screen != screenHelp || !strings.Contains(h.view(), "On a monitor's detail") {
+		t.Fatalf("? on the detail:\n%s", h.view())
+	}
+	h.press("esc")
+	if h.m.screen != screenDetail {
+		t.Fatalf("esc from help went to %v", h.m.screen)
+	}
+}
+
+// A page that failed says so, even under the ones that loaded, until a
+// later one comes in.
+func TestDetailShowsAFailedPage(t *testing.T) {
+	st := detailed()
+	d := newDetailScreen(2, st).withEvents(eventsLoaded{monitorID: 2, beats: []kuma.Beat{{MonitorID: 2, Time: tBase, Msg: "200 - OK"}}})
+	d.eventsDone = false
+	d = d.withEvents(eventsLoaded{monitorID: 2, offset: 1, err: errors.New("timeout")})
+	if v := d.View(st, 80, 30); !strings.Contains(v, "timeout") || !strings.Contains(v, "200 - OK") {
+		t.Errorf("failed page:\n%s", v)
+	}
+	d = d.withEvents(eventsLoaded{monitorID: 2, offset: 1, beats: []kuma.Beat{{MonitorID: 2, Time: tBase.Add(-time.Hour), Msg: "connect ETIMEDOUT"}}})
+	if v := d.View(st, 80, 30); strings.Contains(v, "timeout") {
+		t.Errorf("error kept after a page loaded:\n%s", v)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -43,10 +44,23 @@ type detailScreen struct {
 	eventsDone    bool
 	eventsErr     string
 	cursor        int
+
+	// since is the newest state change the instance held for the monitor
+	// when the screen was built. Those up to it are left to the fetched
+	// pages: the instance keeps the ones Kuma sent on connect, and a clear
+	// that blanked them in Kuma must not bring them back from memory.
+	since time.Time
 }
 
-func newDetailScreen(id int) detailScreen {
-	return detailScreen{id: id, period: defaultPeriod, chartLoading: true, eventsLoading: true}
+// newDetailScreen opens the detail of monitor id, as of the state st.
+func newDetailScreen(id int, st state.Instance) detailScreen {
+	d := detailScreen{id: id, period: defaultPeriod, chartLoading: true, eventsLoading: true}
+	for _, inc := range st.Incidents {
+		if inc.MonitorID == id && inc.Time.After(d.since) {
+			d.since = inc.Time
+		}
+	}
+	return d
 }
 
 type detailAction int
@@ -61,12 +75,13 @@ const (
 	detClearHistory
 )
 
-// shown is the state changes the screen lists: those fetched, and any
-// newer ones the instance has seen since, newest first and without repeats.
+// shown is the state changes the screen lists: those fetched, and any the
+// instance has seen since the screen was built, newest first and without
+// repeats.
 func (d detailScreen) shown(st state.Instance) []kuma.Beat {
 	out := slices.Clone(d.events)
 	for _, inc := range st.Incidents {
-		if inc.MonitorID != d.id {
+		if inc.MonitorID != d.id || !inc.Time.After(d.since) {
 			continue
 		}
 		out = append(out, kuma.Beat{MonitorID: inc.MonitorID, Status: inc.Status, Time: inc.Time, Msg: inc.Msg, Important: true})
@@ -153,12 +168,13 @@ func (d detailScreen) withEvents(msg eventsLoaded) detailScreen {
 		return d
 	}
 	d.events = append(slices.Clone(d.events), msg.beats...)
+	d.eventsErr = ""
 	d.eventsDone = len(msg.beats) < eventPage
 	return d
 }
 
 // keyHintsDetail is the footer of the detail screen.
-const keyHintsDetail = "←/→ period   j/k events   e edit   p pause   v move   C clone   m silence   d delete   x clear events   X clear history   esc back"
+const keyHintsDetail = "←/→ period   j/k events   x clear events   X clear history   e edit   r fields   p pause   v move   C clone   m silence   d delete   ? help   esc back"
 
 func (d detailScreen) View(st state.Instance, width, height int) string {
 	m, ok := st.Monitors[d.id]
@@ -216,15 +232,18 @@ func (d detailScreen) View(st state.Instance, width, height int) string {
 
 	lines = append(lines, styleHeading.Render("events"))
 	events := d.shown(st)
-	rows := max(height-len(lines)-1, 3)
 	switch {
 	case len(events) == 0 && d.eventsLoading:
 		lines = append(lines, styleLabel.Render(truncate("loading…", width)))
-	case len(events) == 0 && d.eventsErr != "":
-		lines = append(lines, styleErr.Render(truncate(d.eventsErr, width)))
-	case len(events) == 0:
+	case len(events) == 0 && d.eventsErr == "":
 		lines = append(lines, styleLabel.Render(truncate("no state changes yet", width)))
 	}
+	// A page that failed says so even under the ones that loaded: j asks
+	// for it again.
+	if d.eventsErr != "" {
+		lines = append(lines, styleErr.Render(truncate(d.eventsErr, width)))
+	}
+	rows := max(height-len(lines)-1, 3)
 	cursor := min(d.cursor, max(len(events)-1, 0))
 	start := 0
 	if cursor >= rows {
@@ -300,7 +319,7 @@ func clearEvents(in *core.Instance, mon state.Monitor) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		return actionDone{name: in.Name(), action: "cleared the events of", mon: mon.Name, err: in.ClearEvents(ctx, mon.ID)}
+		return actionDone{name: in.Name(), action: "cleared the events of", mon: mon.Name, monitorID: mon.ID, err: in.ClearEvents(ctx, mon.ID)}
 	}
 }
 
@@ -308,6 +327,6 @@ func clearHistory(in *core.Instance, mon state.Monitor) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		return actionDone{name: in.Name(), action: "cleared the history of", mon: mon.Name, err: in.ClearHeartbeats(ctx, mon.ID)}
+		return actionDone{name: in.Name(), action: "cleared the history of", mon: mon.Name, monitorID: mon.ID, err: in.ClearHeartbeats(ctx, mon.ID)}
 	}
 }
