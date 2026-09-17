@@ -24,6 +24,11 @@ const (
 // instanceScreen is the monitors of one instance: a list, and the detail of
 // the one under the cursor.
 type instanceScreen struct {
+	// sel is the monitor under the cursor, by id: the list reorders as
+	// states arrive, and a key must act on the monitor that was highlighted,
+	// not on whatever reached its row since. cursor is its row, used when
+	// sel is not in the list (none chosen yet, or filtered out).
+	sel       int
 	cursor    int
 	filter    textinput.Model
 	filtering bool
@@ -65,13 +70,45 @@ func (s instanceScreen) rows(st state.Instance) []state.Row {
 	return st.Tree(state.View{Query: s.filter.Value(), Show: s.show, Order: s.order, Folded: s.folded})
 }
 
+// index is the row under the cursor: the selected monitor's, or the
+// cursor's own row, kept inside the list, when that monitor is not shown.
+func (s instanceScreen) index(rows []state.Row) int {
+	if s.sel != 0 {
+		for i, r := range rows {
+			if r.ID == s.sel {
+				return i
+			}
+		}
+	}
+	return min(s.cursor, max(len(rows)-1, 0))
+}
+
 // selectedRow is the row under the cursor.
 func (s instanceScreen) selectedRow(st state.Instance) (state.Row, bool) {
 	rows := s.rows(st)
 	if len(rows) == 0 {
 		return state.Row{}, false
 	}
-	return rows[min(s.cursor, len(rows)-1)], true
+	return rows[s.index(rows)], true
+}
+
+// moveTo puts the cursor on row i and selects its monitor.
+func (s instanceScreen) moveTo(rows []state.Row, i int) instanceScreen {
+	s.cursor, s.sel = i, 0
+	if i >= 0 && i < len(rows) {
+		s.sel = rows[i].ID
+	}
+	return s
+}
+
+// pin selects the monitor highlighted in st. The app pins to the state last
+// drawn before it takes a new one, so a reorder keeps the cursor on it.
+func (s instanceScreen) pin(st state.Instance) instanceScreen {
+	rows := s.rows(st)
+	if len(rows) == 0 {
+		return s
+	}
+	return s.moveTo(rows, s.index(rows))
 }
 
 // selected is the monitor under the cursor, which may be a group.
@@ -82,6 +119,10 @@ func (s instanceScreen) selected(st state.Instance) (state.Monitor, bool) {
 
 // Update handles a key and says what the app should do about it.
 func (s instanceScreen) Update(msg tea.KeyMsg, st state.Instance) (instanceScreen, instAction, tea.Cmd) {
+	// Every key starts from the monitor highlighted now, so a search, a
+	// show or a sort that still shows it keeps the cursor on it, and one
+	// that hides it puts the cursor on the first row.
+	s = s.pin(st)
 	if s.filtering {
 		switch msg.Type {
 		case tea.KeyEsc:
@@ -106,12 +147,12 @@ func (s instanceScreen) Update(msg tea.KeyMsg, st state.Instance) (instanceScree
 	row, hasRow := s.selectedRow(st)
 	switch {
 	case key.Matches(msg, keys.Up):
-		if s.cursor > 0 {
-			s.cursor--
+		if i := s.index(rows); i > 0 {
+			s = s.moveTo(rows, i-1)
 		}
 	case key.Matches(msg, keys.Down):
-		if s.cursor < n-1 {
-			s.cursor++
+		if i := s.index(rows); i < n-1 {
+			s = s.moveTo(rows, i+1)
 		}
 	case key.Matches(msg, keys.Filter):
 		s.filtering = true
@@ -167,7 +208,7 @@ func (s instanceScreen) Update(msg tea.KeyMsg, st state.Instance) (instanceScree
 func (s instanceScreen) View(name string, st state.Instance, width, height int) string {
 	head := s.header(name, st)
 	rows := s.rows(st)
-	cursor := min(s.cursor, max(len(rows)-1, 0))
+	cursor := s.index(rows)
 
 	bodyHeight := height - lipgloss.Height(head) - 1
 	if bodyHeight < 6 {
@@ -198,7 +239,7 @@ func (s instanceScreen) View(name string, st state.Instance, width, height int) 
 
 // keyHints is the footer of the instance screen, which now does rather more
 // than watch.
-const keyHints = "n new   g group   e edit   d delete   v move   C clone   r fields   p pause   m silence   M silenced   t tags   c channels   i incidents   / search   f show   s sort   esc menu"
+const keyHints = "n new   g group   e edit   d delete   v move   C clone   r fields   p pause   space fold   m silence   M silenced   t tags   c channels   i incidents   / search   f show   s sort   esc menu"
 
 func (s instanceScreen) header(name string, st state.Instance) string {
 	c := st.Counts()

@@ -194,3 +194,39 @@ func TestANewMonitorStartsInTheGroupUnderTheCursor(t *testing.T) {
 		t.Errorf("group list = %+v", g)
 	}
 }
+
+func TestTheMovePickerClosesAsItSends(t *testing.T) {
+	h := onInstance(t, grouped())
+	h.press("j", "j", "j", "v") // status
+	// Something else finishing meanwhile leaves the picker alone.
+	h.send(actionDone{name: "home", action: "paused", mon: "web"})
+	if h.m.screen != screenPick {
+		t.Fatalf("an unrelated result closed the picker: screen %v", h.m.screen)
+	}
+	h.press("j") // Shop
+	next, cmd := h.m.Update(keyMsg("enter"))
+	h.m = next.(Model)
+	if h.m.screen != screenInstance || cmd == nil {
+		t.Fatalf("the picker did not close as it sent: screen %v", h.m.screen)
+	}
+	h.run(cmd)
+	h.press("enter") // on the instance now: nothing to send again
+	moves := 0
+	for _, fr := range h.fakes["home"].Frames() {
+		if strings.Contains(fr, `"editMonitor"`) {
+			moves++
+		}
+	}
+	if moves != 1 {
+		t.Fatalf("%d moves sent: %v", moves, h.fakes["home"].Frames())
+	}
+}
+
+func TestANewRawMonitorStartsInTheGroupUnderTheCursor(t *testing.T) {
+	h := onInstance(t, grouped())             // on Shop
+	h.press("n", "j", "j", "j", "j", "enter") // Other type…
+	h.press("enter")                          // the first type
+	if h.m.screen != screenRaw || h.m.raw.vals["parent"] != "1" {
+		t.Fatalf("raw editor parent = %q on screen %v", h.m.raw.vals["parent"], h.m.screen)
+	}
+}

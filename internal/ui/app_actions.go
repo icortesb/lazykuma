@@ -90,7 +90,11 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "monitor":
 			return m.openMonitorForm(value)
 		case "rawtype":
-			m.raw = newRawEditor("monitor", 0, rawSkeleton(value))
+			skeleton := rawSkeleton(value)
+			if parent := m.newParent(); parent != 0 {
+				skeleton["parent"] = parent
+			}
+			m.raw = newRawEditor("monitor", 0, skeleton)
 			m.backTo, m.screen = screenInstance, screenRaw
 		case "channel":
 			if value == "other" {
@@ -101,12 +105,16 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.cform = newChannelForm(value)
 			m.backTo, m.screen = screenChannels, screenChannel
 		case "move":
+			// The picker closes as the write goes: a second enter must not
+			// send it again, and its result must not close a later screen.
 			parent, _ := strconv.Atoi(value)
+			m.screen = m.backTo
 			return m, moveMonitor(m.current().inst, m.moving, parent)
 		case "delgroup":
 			g := m.moving
 			switch value {
 			case "keep":
+				m.screen = m.backTo
 				return m, deleteGroup(m.current().inst, g, false)
 			case "all":
 				m.ask = confirm{
@@ -224,7 +232,11 @@ func (m Model) updateRaw(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.raw.what == "channel" {
 			return m, saveChannel(m.current().inst, values, m.raw.id)
 		}
-		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, nil, nil)
+		var addTags []kuma.Tag
+		if m.raw.id == 0 {
+			addTags = m.raw.cloneTags
+		}
+		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil)
 	}
 	return m, cmd
 }

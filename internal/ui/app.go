@@ -3,6 +3,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -190,22 +191,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case InstanceState:
-		if i := m.find(msg.Name); i >= 0 {
-			m.insts[i].st = msg.State
+		i := m.find(msg.Name)
+		if i < 0 {
+			return m, nil
+		}
+		prev := m.insts[i].st
+		if i == m.cur {
+			// Pin the cursor to the monitor drawn under it before the new
+			// state reorders the list.
+			m.inst = m.inst.pin(prev)
+		}
+		m.insts[i].st = msg.State
+		// Kuma only gives the tags when asked, and a session that was not
+		// up yet when the instance opened could not answer: ask again once
+		// it is, or a clone made now would find no tags to copy.
+		if i == m.cur && m.screen != screenMenu && msg.State.Conn == state.ConnOK && prev.Conn != state.ConnOK {
+			return m, loadTags(m.insts[i].inst)
 		}
 		return m, nil
 
 	case actionDone:
 		if msg.err != nil {
-			if msg.saved && m.screen == screenMonitor {
+			if msg.saved && (m.screen == screenMonitor || m.screen == screenRaw) {
 				m.screen = m.backTo
 			}
 			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, kuma.Brief(msg.err)), 8*time.Second)
 		}
 		// A write lands: leave the form and let the instance's next state
-		// show the result.
+		// show the result. The pickers that write (move, delete group) close
+		// as they send, like the confirmation: a picker open now was opened
+		// since, for something else.
 		switch m.screen {
-		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenPick, screenName, screenTag:
+		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag:
 			m.screen = m.backTo
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
@@ -215,6 +232,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, done
 
 	case tagsLoaded:
+		if errors.Is(msg.err, kuma.ErrNotConnected) {
+			// Asked before the session was up; they are asked for again
+			// when it is.
+			return m, nil
+		}
 		if msg.err != nil {
 			return m, flashFor("tags: "+kuma.Brief(msg.err), 8*time.Second)
 		}
@@ -244,6 +266,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mon = kuma.ForClone(msg.mon)
 			}
 			m.raw = newRawEditor("monitor", 0, mon)
+			if msg.mode == loadClone {
+				m.raw.cloneTags = rawTags(msg.mon["tags"])
+			}
 			m.backTo, m.screen = screenInstance, screenRaw
 			return m, nil
 		}

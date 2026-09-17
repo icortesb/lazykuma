@@ -113,6 +113,10 @@ func TestInstanceFilter(t *testing.T) {
 	if act != instNone || len(s.rows(in)) != 4 {
 		t.Fatalf("esc: action %v, %d visible", act, len(s.rows(in)))
 	}
+	// The monitor the search found stays under the cursor.
+	if m, _ := s.selected(in); m.Name != "nextcloud" {
+		t.Errorf("after clearing the search: %q", m.Name)
+	}
 	if _, act, _ = s.Update(keyMsg("esc"), in); act != instBack {
 		t.Fatalf("second esc = %v, want back", act)
 	}
@@ -255,5 +259,29 @@ func assertFits(t *testing.T, out string, width int) {
 		if w := lipgloss.Width(line); w > width {
 			t.Errorf("line %d is %d wide, over %d: %q", i, w, width, line)
 		}
+	}
+}
+
+func TestInstanceSortAndShowKeepTheSelection(t *testing.T) {
+	in := homelab() // vaultwarden (down), nextcloud, pihole, backup-s3 (paused)
+	s := newInstanceScreen()
+	s, _, _ = s.Update(keyMsg("j"), in)
+	s, _, _ = s.Update(keyMsg("k"), in) // vaultwarden
+	s, _, _ = s.Update(keyMsg("s"), in) // by name it is last
+	if m, _ := s.selected(in); m.Name != "vaultwarden" {
+		t.Errorf("after s: %q", m.Name)
+	}
+
+	// pihole down too: pihole, vaultwarden, nextcloud, backup-s3.
+	in = state.Apply(in, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: 2, Status: kuma.StatusDown, Time: tBase.Add(time.Hour)}}, tBase.Add(time.Hour))
+	s = newInstanceScreen()
+	s, _, _ = s.Update(keyMsg("j"), in) // vaultwarden
+	s, _, _ = s.Update(keyMsg("f"), in) // down: pihole, vaultwarden
+	if m, _ := s.selected(in); m.Name != "vaultwarden" {
+		t.Errorf("show down: %q", m.Name)
+	}
+	s, _, _ = s.Update(keyMsg("f"), in) // up: vaultwarden is not shown
+	if m, _ := s.selected(in); m.Name != "nextcloud" {
+		t.Errorf("show up: %q", m.Name)
 	}
 }

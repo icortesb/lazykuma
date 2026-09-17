@@ -125,6 +125,7 @@ type monitorForm struct {
 	// count as not yet added, so they are applied to the copy.
 	tagsBefore []kuma.Tag
 	clone      bool
+	cloneOf    string // the name of the monitor a clone copies, for the title
 }
 
 func (m monitorForm) inLists() bool { return m.list >= 0 }
@@ -216,7 +217,7 @@ func editMonitorForm(mon kuma.RawMonitor, lists formLists) monitorForm {
 func cloneMonitorForm(mon kuma.RawMonitor, lists formLists) monitorForm {
 	m := editMonitorForm(mon, lists)
 	m.base = kuma.ForClone(mon)
-	m.id, m.clone = 0, true
+	m.id, m.clone, m.cloneOf = 0, true, fieldText(mon["name"])
 	if i := m.index("name"); i >= 0 {
 		m.fields[i].SetValue(fieldText(m.base["name"]))
 	}
@@ -476,30 +477,39 @@ func (m monitorForm) Values() (kuma.RawMonitor, error) {
 
 // TagChanges is what to do to the monitor's tags after saving it: Kuma's
 // add and editMonitor ignore tags. A new tag goes on with no value; a
-// removed one names the value it had, which Kuma matches on. A clone starts
-// with none, so its source's tags, values kept, are all added.
+// removed one names the value it had, which Kuma matches on, and a tag the
+// monitor carries more than once, with different values, goes with all of
+// them. A clone starts with none, so its source's tags, values kept, are all
+// added: the ticked ones, and those the form did not list, which the user
+// could not untick (the instance's tags were not fetched yet, or a tag was
+// made in the web UI since).
 func (m monitorForm) TagChanges() (add, remove []kuma.Tag) {
-	before := map[int]kuma.Tag{}
+	before := map[int][]kuma.Tag{}
 	for _, t := range m.tagsBefore {
-		before[t.ID] = t
+		before[t.ID] = append(before[t.ID], t)
 	}
+	listed := map[int]bool{}
 	for _, l := range m.lists {
 		if l.title != listTags {
 			continue
 		}
 		for _, it := range l.items {
+			listed[it.id] = true
 			had, was := before[it.id]
 			switch {
-			case m.clone && it.on:
-				t := kuma.Tag{ID: it.id, Name: it.name}
-				if was {
-					t.Value = had.Value
-				}
-				add = append(add, t)
+			case m.clone && it.on && was:
+				add = append(add, had...)
 			case it.on && !was:
 				add = append(add, kuma.Tag{ID: it.id, Name: it.name})
 			case !it.on && was && !m.clone:
-				remove = append(remove, had)
+				remove = append(remove, had...)
+			}
+		}
+	}
+	if m.clone {
+		for _, t := range m.tagsBefore {
+			if !listed[t.ID] {
+				add = append(add, t)
 			}
 		}
 	}
@@ -527,7 +537,10 @@ func splitList(v string) []string {
 
 func (m monitorForm) View(width int) string {
 	title := "New " + m.kind + " monitor"
-	if m.id != 0 {
+	switch {
+	case m.clone:
+		title = "Clone of " + m.cloneOf
+	case m.id != 0:
 		title = "Edit " + fieldText(m.base["name"])
 	}
 	var b strings.Builder

@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -311,5 +312,81 @@ func TestCloneFormKeepsTagsAndDropsTheID(t *testing.T) {
 	add, remove := m.TagChanges()
 	if len(add) != 1 || add[0].ID != 4 || add[0].Value != "eu" || len(remove) != 0 {
 		t.Errorf("clone tags: add %+v remove %+v", add, remove)
+	}
+}
+
+func TestCloneAddsTagsTheFormDidNotList(t *testing.T) {
+	// Right after startup the tag list may not be fetched yet: the form
+	// lists no tags, and the clone must still carry its source's.
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+		"tags": []any{
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"},
+			map[string]any{"tag_id": float64(9), "name": "team", "color": "#DC2626", "value": "ops"},
+		},
+	}
+	add, remove := cloneMonitorForm(mon, formLists{}).TagChanges()
+	if len(add) != 2 || add[0].ID != 4 || add[0].Value != "eu" || add[1].ID != 9 || add[1].Value != "ops" || len(remove) != 0 {
+		t.Fatalf("clone with no tag list: add %+v remove %+v", add, remove)
+	}
+
+	// Listed and unticked is the user's choice; not listed is kept.
+	m := cloneMonitorForm(mon, sampleLists())
+	m.lists[1].items[0].on = false // region
+	add, _ = m.TagChanges()
+	if len(add) != 1 || add[0].ID != 9 {
+		t.Fatalf("clone with region unticked: add %+v", add)
+	}
+}
+
+func TestATagCarriedTwice(t *testing.T) {
+	// Kuma lets a monitor carry one tag several times, with different
+	// values.
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+		"tags": []any{
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"},
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "us"},
+		},
+	}
+	add, remove := cloneMonitorForm(mon, sampleLists()).TagChanges()
+	if len(add) != 2 || add[0].Value != "eu" || add[1].Value != "us" || len(remove) != 0 {
+		t.Errorf("clone: add %+v remove %+v", add, remove)
+	}
+
+	m := editMonitorForm(mon, sampleLists())
+	if add, remove := m.TagChanges(); len(add) != 0 || len(remove) != 0 {
+		t.Errorf("untouched edit: add %+v remove %+v", add, remove)
+	}
+	m.lists[1].items[0].on = false
+	add, remove = m.TagChanges()
+	if len(add) != 0 || len(remove) != 2 || remove[0].Value != "eu" || remove[1].Value != "us" {
+		t.Errorf("unticked: add %+v remove %+v", add, remove)
+	}
+}
+
+func TestEditToNoGroupSendsANullParent(t *testing.T) {
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com", "parent": float64(1),
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+	}
+	m := editMonitorForm(mon, sampleLists())
+	if g := m.lists[0].items; g[0].on || !g[1].on {
+		t.Fatalf("group list = %+v", g)
+	}
+	m.lists[0].items[0].on, m.lists[0].items[1].on = true, false // No group
+	out, err := m.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Kuma keeps the parent it has unless it is told null.
+	b, _ := json.Marshal(out)
+	if !strings.Contains(string(b), `"parent":null`) {
+		t.Fatalf("sent %s", b)
 	}
 }
