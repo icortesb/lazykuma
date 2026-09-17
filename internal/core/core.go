@@ -423,7 +423,8 @@ func (i *Instance) ImportantBeats(ctx context.Context, monitorID, offset, count 
 	return s.ImportantBeats(ctx, monitorID, offset, count)
 }
 
-// ClearEvents blanks a monitor's state-change messages.
+// ClearEvents removes a monitor's past state changes from its history; its
+// beats and uptime stay.
 func (i *Instance) ClearEvents(ctx context.Context, monitorID int) error {
 	s, err := i.session()
 	if err != nil {
@@ -432,7 +433,8 @@ func (i *Instance) ClearEvents(ctx context.Context, monitorID int) error {
 	return s.ClearEvents(ctx, monitorID)
 }
 
-// ClearHeartbeats deletes a monitor's uptime statistics.
+// ClearHeartbeats deletes all of a monitor's beats, state changes and uptime
+// statistics.
 func (i *Instance) ClearHeartbeats(ctx context.Context, monitorID int) error {
 	s, err := i.session()
 	if err != nil {

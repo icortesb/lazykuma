@@ -94,7 +94,9 @@ func (s *Session) ImportantBeats(ctx context.Context, monitorID, offset, count i
 	return out, nil
 }
 
-// ClearEvents blanks a monitor's state-change messages; its uptime stays.
+// ClearEvents removes a monitor's past state changes from its history: Kuma
+// blanks their messages and unmarks them, so they no longer page back. Its
+// beats and uptime stay.
 func (s *Session) ClearEvents(ctx context.Context, monitorID int) error {
 	r, err := s.call(ctx, "clearEvents", monitorID)
 	if err != nil {
@@ -103,8 +105,9 @@ func (s *Session) ClearEvents(ctx context.Context, monitorID int) error {
 	return r.err()
 }
 
-// ClearHeartbeats deletes a monitor's uptime statistics and restarts it, so
-// its chart and uptime start again from now.
+// ClearHeartbeats deletes all of a monitor's beats, and with them its state
+// changes and uptime statistics, so its chart and uptime start again from
+// now. Kuma restarts the monitor only if it is active.
 func (s *Session) ClearHeartbeats(ctx context.Context, monitorID int) error {
 	r, err := s.call(ctx, "clearHeartbeats", monitorID)
 	if err != nil {

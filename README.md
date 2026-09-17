@@ -62,8 +62,9 @@ tag names and values as well as names and targets.
 - its latest beats
 - the history of its state changes, fetched from Kuma as you scroll
 
-The monitor keys work there too. `x` clears the messages of its past state changes, and `X`
-clears its uptime history, each after asking.
+The monitor keys work there too. `x` removes its past state changes from the history, keeping its
+beats and uptime; `X` deletes all of its beats, state changes and uptime statistics, so the chart
+starts again from now. Each asks first.
 
 Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored

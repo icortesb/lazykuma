@@ -506,13 +506,13 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case detClearEvents:
 		m.ask = confirm{
 			question: fmt.Sprintf("Clear the events of %s?", mon.Name),
-			detail:   "Kuma blanks the messages of its past state changes; its uptime stays",
+			detail:   "Kuma removes its past state changes from the history; its beats and uptime stay",
 		}
 		m.onYes, m.backTo, m.screen = clearEvents(in.inst, mon), screenDetail, screenConfirm
 	case detClearHistory:
 		m.ask = confirm{
 			question: fmt.Sprintf("Clear the history of %s?", mon.Name),
-			detail:   "Kuma deletes its uptime statistics and starts it again; the chart and uptime begin from now",
+			detail:   "Kuma deletes all of its beats, state changes and uptime statistics; the chart starts again from now",
 		}
 		m.onYes, m.backTo, m.screen = clearHistory(in.inst, mon), screenDetail, screenConfirm
 	}

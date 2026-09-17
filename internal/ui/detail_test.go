@@ -125,16 +125,16 @@ func TestDetailActions(t *testing.T) {
 		t.Fatalf("esc from the form did not return to the detail: %v", h.m.screen)
 	}
 	h.press("x")
-	if !strings.Contains(h.view(), "Clear the events of web?") {
-		t.Fatalf("no clear-events question:\n%s", h.view())
+	if v := h.view(); !strings.Contains(v, "Clear the events of web?") || !strings.Contains(v, "removes its past state changes") {
+		t.Fatalf("no clear-events question:\n%s", v)
 	}
 	h.press("y")
 	if !h.fakes["home"].Sent(`["clearEvents",2]`) || h.m.screen != screenDetail {
 		t.Fatalf("clear events: screen %v, frames %v", h.m.screen, h.fakes["home"].Frames())
 	}
 	h.press("X")
-	if !strings.Contains(h.view(), "Clear the history of web?") {
-		t.Fatalf("no clear-history question:\n%s", h.view())
+	if v := h.view(); !strings.Contains(v, "Clear the history of web?") || !strings.Contains(v, "deletes all of its beats, state changes and uptime") {
+		t.Fatalf("no clear-history question:\n%s", v)
 	}
 	h.press("y")
 	if !h.fakes["home"].Sent(`["clearHeartbeats",2]`) {
