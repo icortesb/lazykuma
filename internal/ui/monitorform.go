@@ -76,11 +76,36 @@ func fieldsFor(kind string) []field {
 	return nil
 }
 
-// channelToggle is a notification channel and whether this monitor uses it.
-type channelToggle struct {
+// toggle is one entry of a list under the form's fields: a group, a tag or
+// a channel, and whether this monitor has it.
+type toggle struct {
 	id   int
 	name string
 	on   bool
+}
+
+// channelToggle keeps the name the channel code knows toggles by.
+type channelToggle = toggle
+
+// The lists under the fields, by title, in the order they show.
+const (
+	listGroup    = "group"
+	listTags     = "tags"
+	listChannels = "notify through"
+)
+
+// toggleList is a list under the fields. A radio list has exactly one entry
+// on: a monitor is in one group or none.
+type toggleList struct {
+	title string
+	items []toggle
+	radio bool
+}
+
+// formLists is what a monitor can be put in or given: the instance's
+// groups ("No group" first, id 0), tags and channels.
+type formLists struct {
+	groups, tags, channels []toggle
 }
 
 // monitorForm creates or edits one monitor.
@@ -90,15 +115,32 @@ type monitorForm struct {
 	id   int // 0 when creating
 	// base is the whole monitor an edit must send back: Kuma replaces the
 	// monitor with what it receives and refuses a partial object.
-	base     kuma.RawMonitor
-	defs     []field
-	channels []channelToggle
-	onChans  bool // the cursor is in the channel list
-	chanCur  int
+	base kuma.RawMonitor
+	defs []field
+	// lists are the group, tags and channels, the empty ones left out.
+	lists []toggleList
+	list  int // the list the cursor is in; -1 while it is in the fields
+	item  int
+	// tagsBefore are the monitor's tags when the form opened: a clone's
+	// count as not yet added, so they are applied to the copy.
+	tagsBefore []kuma.Tag
+	clone      bool
+}
+
+func (m monitorForm) inLists() bool { return m.list >= 0 }
+
+// channelItems is the channel list's entries, for the tests and the view.
+func (m monitorForm) channelItems() []toggle {
+	for _, l := range m.lists {
+		if l.title == listChannels {
+			return l.items
+		}
+	}
+	return nil
 }
 
 // newMonitorForm starts a new monitor of the given type.
-func newMonitorForm(kind string, channels []channelToggle) monitorForm {
+func newMonitorForm(kind string, lists formLists) monitorForm {
 	defs := fieldsFor(kind)
 	inputs := make([]textinputModel, 0, len(defs))
 	for _, d := range defs {
@@ -106,7 +148,17 @@ func newMonitorForm(kind string, channels []channelToggle) monitorForm {
 	}
 	f := form{fields: inputs, shown: len(inputs)}
 	f, _ = f.focusOn(0)
-	m := monitorForm{form: f, kind: kind, defs: defs, channels: channels}
+	m := monitorForm{form: f, kind: kind, defs: defs, list: -1}
+	// A form only offers a group when there is one to be in.
+	if len(lists.groups) > 1 {
+		m.lists = append(m.lists, toggleList{title: listGroup, items: lists.groups, radio: true})
+	}
+	if len(lists.tags) > 0 {
+		m.lists = append(m.lists, toggleList{title: listTags, items: lists.tags})
+	}
+	if len(lists.channels) > 0 {
+		m.lists = append(m.lists, toggleList{title: listChannels, items: lists.channels})
+	}
 	// Kuma's own defaults, so an empty field means what the web UI means.
 	for key, value := range map[string]string{
 		"interval": "60", "maxretries": "0", "accepted_statuscodes": "200-299", "invertKeyword": "no",
@@ -119,9 +171,9 @@ func newMonitorForm(kind string, channels []channelToggle) monitorForm {
 }
 
 // editMonitorForm fills the form from a monitor Kuma returned whole.
-func editMonitorForm(mon kuma.RawMonitor, channels []channelToggle) monitorForm {
+func editMonitorForm(mon kuma.RawMonitor, lists formLists) monitorForm {
 	kind, _ := mon["type"].(string)
-	m := newMonitorForm(kind, channels)
+	m := newMonitorForm(kind, lists)
 	m.base = mon
 	if id, ok := numberOf(mon["id"]); ok {
 		m.id = id
@@ -129,6 +181,7 @@ func editMonitorForm(mon kuma.RawMonitor, channels []channelToggle) monitorForm 
 	for i, d := range m.defs {
 		m.fields[i].SetValue(fieldText(mon[d.key]))
 	}
+	parent, _ := numberOf(mon["parent"])
 	on := map[string]bool{}
 	if raw, ok := mon["notificationIDList"].(map[string]any); ok {
 		for id, v := range raw {
@@ -137,10 +190,55 @@ func editMonitorForm(mon kuma.RawMonitor, channels []channelToggle) monitorForm 
 			}
 		}
 	}
-	for i := range m.channels {
-		m.channels[i].on = on[strconv.Itoa(m.channels[i].id)]
+	m.tagsBefore = rawTags(mon["tags"])
+	has := map[int]bool{}
+	for _, t := range m.tagsBefore {
+		has[t.ID] = true
+	}
+	for li := range m.lists {
+		l := &m.lists[li]
+		for i := range l.items {
+			switch l.title {
+			case listGroup:
+				l.items[i].on = l.items[i].id == parent
+			case listTags:
+				l.items[i].on = has[l.items[i].id]
+			case listChannels:
+				l.items[i].on = on[strconv.Itoa(l.items[i].id)]
+			}
+		}
 	}
 	return m
+}
+
+// cloneMonitorForm is a new monitor made from a whole one: its settings,
+// group, channels and tags, under "copy of" its name.
+func cloneMonitorForm(mon kuma.RawMonitor, lists formLists) monitorForm {
+	m := editMonitorForm(mon, lists)
+	m.base = kuma.ForClone(mon)
+	m.id, m.clone = 0, true
+	if i := m.index("name"); i >= 0 {
+		m.fields[i].SetValue(fieldText(m.base["name"]))
+	}
+	return m
+}
+
+// rawTags reads the tags getMonitor returns on a monitor.
+func rawTags(v any) []kuma.Tag {
+	list, _ := v.([]any)
+	out := make([]kuma.Tag, 0, len(list))
+	for _, e := range list {
+		t, _ := e.(map[string]any)
+		id, ok := numberOf(t["tag_id"])
+		if !ok {
+			continue
+		}
+		name, _ := t["name"].(string)
+		color, _ := t["color"].(string)
+		value, _ := t["value"].(string)
+		out = append(out, kuma.Tag{ID: id, Name: name, Color: color, Value: value})
+	}
+	return out
 }
 
 // index is the field filling a monitor key, or -1.
@@ -187,40 +285,53 @@ func numberOf(v any) (int, bool) {
 	return 0, false
 }
 
-// Update handles a key. The channel list sits after the fields: tab walks
-// into it and space toggles a channel.
+// Update handles a key. The group, tag and channel lists sit after the
+// fields: tab walks into them, and on through them a list at a time; space
+// chooses a group or toggles a tag or a channel.
 func (m monitorForm) Update(msg tea.Msg) (monitorForm, formAction, tea.Cmd) {
 	k, isKey := msg.(tea.KeyMsg)
-	if isKey && m.onChans {
+	if isKey && m.inLists() {
+		l := &m.lists[m.list]
 		switch {
 		case key.Matches(k, keys.Back):
 			return m, formCancel, nil
+		case k.Type == tea.KeyShiftTab:
+			return m.prevList()
+		case k.Type == tea.KeyTab:
+			if m.list < len(m.lists)-1 {
+				m.list, m.item = m.list+1, 0
+			}
 		case key.Matches(k, keys.Up):
-			if m.chanCur > 0 {
-				m.chanCur--
+			if m.item > 0 {
+				m.item--
 			} else {
-				m.onChans = false
-				f, cmd := m.form.focusOn(m.shown - 1)
-				m.form = f
-				return m, formNone, cmd
+				return m.prevList()
 			}
 		case key.Matches(k, keys.Down):
-			if m.chanCur < len(m.channels)-1 {
-				m.chanCur++
+			if m.item < len(l.items)-1 {
+				m.item++
+			} else if m.list < len(m.lists)-1 {
+				m.list, m.item = m.list+1, 0
 			}
 		case k.Type == tea.KeySpace:
-			m.channels[m.chanCur].on = !m.channels[m.chanCur].on
+			if l.radio {
+				for i := range l.items {
+					l.items[i].on = i == m.item
+				}
+			} else {
+				l.items[m.item].on = !l.items[m.item].on
+			}
 		case k.Type == tea.KeyEnter:
 			return m, formSubmit, nil
 		}
 		return m, formNone, nil
 	}
 
-	// Leaving the last field walks into the channel list rather than
-	// submitting, so the channels are never skipped by accident.
-	if isKey && len(m.channels) > 0 && m.focus == m.shown-1 &&
+	// Leaving the last field walks into the lists rather than submitting,
+	// so they are never skipped by accident.
+	if isKey && len(m.lists) > 0 && m.focus == m.shown-1 &&
 		(k.Type == tea.KeyEnter || key.Matches(k, keys.Next)) {
-		m.onChans, m.chanCur = true, 0
+		m.list, m.item = 0, 0
 		for i := range m.fields {
 			m.fields[i].Blur()
 		}
@@ -230,6 +341,20 @@ func (m monitorForm) Update(msg tea.Msg) (monitorForm, formAction, tea.Cmd) {
 	f, act, cmd := m.form.update(msg)
 	m.form = f
 	return m, act, cmd
+}
+
+// prevList goes up out of a list: to the end of the previous one, or back
+// to the last field.
+func (m monitorForm) prevList() (monitorForm, formAction, tea.Cmd) {
+	if m.list > 0 {
+		m.list--
+		m.item = len(m.lists[m.list].items) - 1
+		return m, formNone, nil
+	}
+	m.list = -1
+	f, cmd := m.form.focusOn(m.shown - 1)
+	m.form = f
+	return m, formNone, cmd
 }
 
 // Values is the monitor to send. An edit keeps every field Kuma knows and
@@ -310,6 +435,22 @@ func (m monitorForm) Values() (kuma.RawMonitor, error) {
 		}
 	}
 
+	for _, l := range m.lists {
+		if l.title != listGroup {
+			continue
+		}
+		for _, g := range l.items {
+			if !g.on {
+				continue
+			}
+			if g.id == 0 {
+				out["parent"] = nil
+			} else {
+				out["parent"] = g.id
+			}
+		}
+	}
+
 	// Start from the monitor's own channels and only flip the ones this
 	// form showed: editMonitor replaces the monitor, so a channel the form
 	// never knew about must not be dropped from it.
@@ -321,7 +462,7 @@ func (m monitorForm) Values() (kuma.RawMonitor, error) {
 			}
 		}
 	}
-	for _, c := range m.channels {
+	for _, c := range m.channelItems() {
 		key := strconv.Itoa(c.id)
 		if c.on {
 			ids[key] = true
@@ -331,6 +472,38 @@ func (m monitorForm) Values() (kuma.RawMonitor, error) {
 	}
 	out["notificationIDList"] = ids
 	return out, nil
+}
+
+// TagChanges is what to do to the monitor's tags after saving it: Kuma's
+// add and editMonitor ignore tags. A new tag goes on with no value; a
+// removed one names the value it had, which Kuma matches on. A clone starts
+// with none, so its source's tags, values kept, are all added.
+func (m monitorForm) TagChanges() (add, remove []kuma.Tag) {
+	before := map[int]kuma.Tag{}
+	for _, t := range m.tagsBefore {
+		before[t.ID] = t
+	}
+	for _, l := range m.lists {
+		if l.title != listTags {
+			continue
+		}
+		for _, it := range l.items {
+			had, was := before[it.id]
+			switch {
+			case m.clone && it.on:
+				t := kuma.Tag{ID: it.id, Name: it.name}
+				if was {
+					t.Value = had.Value
+				}
+				add = append(add, t)
+			case it.on && !was:
+				add = append(add, kuma.Tag{ID: it.id, Name: it.name})
+			case !it.on && was && !m.clone:
+				remove = append(remove, had)
+			}
+		}
+	}
+	return add, remove
 }
 
 func isYes(v string) bool {
@@ -358,23 +531,32 @@ func (m monitorForm) View(width int) string {
 		title = "Edit " + fieldText(m.base["name"])
 	}
 	var b strings.Builder
-	b.WriteString(m.view(title, "tab moves; enter on the last field goes to the channels"))
-	if len(m.channels) > 0 {
-		b.WriteString("\n\n" + styleLabel.Render("notify through") + "\n")
-		for i, c := range m.channels {
+	b.WriteString(m.view(title, "tab moves; enter on the last field goes to the lists below"))
+	if len(m.lists) == 0 {
+		return b.String()
+	}
+	for li, l := range m.lists {
+		b.WriteString("\n\n" + styleLabel.Render(l.title) + "\n")
+		for i, it := range l.items {
 			mark := "[ ]"
-			if c.on {
+			switch {
+			case l.radio && it.on:
+				mark = "(x)"
+			case l.radio:
+				mark = "( )"
+			case it.on:
 				mark = "[x]"
 			}
-			line := fmt.Sprintf("%s %s", mark, c.name)
-			if m.onChans && i == m.chanCur {
+			line := fmt.Sprintf("%s %s", mark, it.name)
+			if m.list == li && i == m.item {
 				line = styleRow.Render(" " + line + " ")
 			} else {
 				line = styleValue.Render(" " + line)
 			}
 			b.WriteString(line + "\n")
 		}
-		b.WriteString(styleFooter.Render(styleKey.Render("space") + " toggle   " + styleKey.Render("enter") + " save"))
 	}
+	b.WriteString(styleFooter.Render(styleKey.Render("space") + " choose/toggle   " +
+		styleKey.Render("tab") + " next list   " + styleKey.Render("enter") + " save"))
 	return b.String()
 }

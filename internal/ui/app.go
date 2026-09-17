@@ -134,6 +134,10 @@ type (
 		action string // "paused" or "resumed"
 		mon    string
 		err    error
+		// saved is set when the write landed but a follow-up did not, as a
+		// monitor whose tags failed: the form must close all the same, or a
+		// retry would create the monitor a second time.
+		saved bool
 	}
 	loginDone struct {
 		name  string
@@ -145,11 +149,20 @@ type (
 	monitorLoaded struct {
 		instance string // which instance asked: the user can move on
 		mon      kuma.RawMonitor
-		toRaw    bool
+		mode     loadMode
 		err      error
 	}
 	flashMsg      struct{ text string }
 	clearFlashMsg struct{ text string }
+)
+
+// loadMode is what a fetched monitor is for.
+type loadMode int
+
+const (
+	loadEdit loadMode = iota
+	loadRaw
+	loadClone
 )
 
 // flashFor shows text for a while; a newer flash is not cut short by the
@@ -184,6 +197,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionDone:
 		if msg.err != nil {
+			if msg.saved && m.screen == screenMonitor {
+				m.screen = m.backTo
+			}
 			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, kuma.Brief(msg.err)), 8*time.Second)
 		}
 		// A write lands: leave the form and let the instance's next state
@@ -214,19 +230,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// would save one instance's monitor into another.
 			return m, nil
 		}
-		if msg.toRaw {
+		if msg.mode == loadRaw {
 			m.raw = newRawEditor("monitor", 0, msg.mon)
 			m.backTo, m.screen = screenInstance, screenRaw
 			return m, nil
 		}
 		kind, _ := msg.mon["type"].(string)
 		if !isCuratedKind(kind) {
-			// No form knows this type's fields; its own values do.
-			m.raw = newRawEditor("monitor", 0, msg.mon)
+			// No form knows this type's fields; its own values do. A clone
+			// is a new monitor there too, so it is saved with no id.
+			mon := msg.mon
+			if msg.mode == loadClone {
+				mon = kuma.ForClone(msg.mon)
+			}
+			m.raw = newRawEditor("monitor", 0, mon)
 			m.backTo, m.screen = screenInstance, screenRaw
 			return m, nil
 		}
-		m.mform = editMonitorForm(msg.mon, m.channelToggles(false))
+		lists := m.formLists(0, true)
+		if msg.mode == loadClone {
+			m.mform = cloneMonitorForm(msg.mon, lists)
+		} else {
+			m.mform = editMonitorForm(msg.mon, lists)
+		}
 		m.backTo, m.screen = screenInstance, screenMonitor
 		return m, nil
 
@@ -386,7 +412,7 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.onYes, m.backTo, m.screen = toggleGroup(in.inst, row.Monitor, ids), screenInstance, screenConfirm
 			break
 		}
-		cmd = toggle(in.inst, row.Monitor)
+		cmd = togglePause(in.inst, row.Monitor)
 	case instNew:
 		options := make([]option, 0, len(curatedKinds)+1)
 		for _, k := range curatedKinds {
@@ -402,11 +428,15 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			break
 		}
 		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, false)
+			cmd = loadMonitor(in.inst, row.ID, loadEdit)
 		}
 	case instRaw:
 		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, true)
+			cmd = loadMonitor(in.inst, row.ID, loadRaw)
+		}
+	case instClone:
+		if hasRow {
+			cmd = loadMonitor(in.inst, row.ID, loadClone)
 		}
 	case instDelete:
 		if !hasRow {
@@ -454,8 +484,8 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// toggle pauses a running monitor or resumes a paused one.
-func toggle(in *core.Instance, mon state.Monitor) tea.Cmd {
+// togglePause pauses a running monitor or resumes a paused one.
+func togglePause(in *core.Instance, mon state.Monitor) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

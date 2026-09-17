@@ -162,3 +162,35 @@ func TestSilenceAGroupCoversItsMonitors(t *testing.T) {
 		t.Fatalf("maintenance does not cover the group: %v", h.fakes["home"].Frames())
 	}
 }
+
+func TestANewMonitorStartsInTheGroupUnderTheCursor(t *testing.T) {
+	h := onInstance(t, grouped())
+	row, _ := h.m.inst.selectedRow(h.m.current().st)
+	if !row.Group || row.ID != 1 {
+		t.Fatalf("the cursor is not on Shop: %+v", row)
+	}
+	h.press("n", "enter") // HTTP
+	h.typeText("cart")
+	h.press("tab")
+	h.typeText("https://cart.example.com")
+	if !strings.Contains(h.view(), "(x) Shop") {
+		t.Errorf("Shop is not chosen:\n%s", h.view())
+	}
+	for i := 0; i < 8 && !h.m.mform.inLists(); i++ {
+		h.press("tab")
+	}
+	h.press("enter")
+	if !h.fakes["home"].Sent(`"parent":1`) {
+		t.Fatalf("the new monitor is not in Shop: %v", h.fakes["home"].Frames())
+	}
+
+	// On a monitor inside the group, a new one goes next to it.
+	h.press("j")
+	if row, _ := h.m.inst.selectedRow(h.m.current().st); row.Group || row.Parent != 1 {
+		t.Fatalf("the cursor is not on a monitor in Shop: %+v", row)
+	}
+	h.press("n", "enter")
+	if g := h.m.mform.lists[0]; g.title != listGroup || !g.items[1].on || g.items[0].on {
+		t.Errorf("group list = %+v", g)
+	}
+}

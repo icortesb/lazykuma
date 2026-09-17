@@ -26,10 +26,10 @@ func onInstance(t *testing.T, st state.Instance) *harness {
 // list that sits after the fields.
 func (h *harness) toChannels() {
 	h.t.Helper()
-	for i := 0; i < 12 && !h.m.mform.onChans; i++ {
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listChannels); i++ {
 		h.press("tab")
 	}
-	if !h.m.mform.onChans {
+	if !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listChannels) {
 		h.t.Fatal("never reached the channel list")
 	}
 }
@@ -59,7 +59,7 @@ func TestCreateAMonitorThroughTheUI(t *testing.T) {
 	h.typeText("https://pi.home.lan")
 	h.toChannels() // past interval, retries and accept
 	// The default channel comes ticked, as Kuma's own form does.
-	if !h.m.mform.channels[0].on {
+	if !h.m.mform.channelItems()[0].on {
 		t.Fatal("the default channel is not ticked")
 	}
 	h.press("enter") // save
@@ -263,5 +263,68 @@ func TestALateMonitorFromAnotherInstanceIsIgnored(t *testing.T) {
 	h.send(monitorLoaded{instance: "elsewhere", mon: kuma.RawMonitor{"id": float64(1), "type": "http", "name": "x"}})
 	if h.m.screen != screenInstance {
 		t.Fatalf("a foreign monitor opened screen %v", h.m.screen)
+	}
+}
+
+func TestCloneAMonitorThroughTheUI(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("C") // nextcloud
+	if !strings.Contains(h.view(), "copy of nextcloud") {
+		t.Fatalf("no clone form:\n%s", h.view())
+	}
+	h.toChannels()
+	h.press("enter")
+	f := h.fakes["home"]
+	if !f.Sent(`["add",`) || !f.Sent(`"name":"copy of nextcloud"`) {
+		t.Fatalf("clone not sent: %v", f.Frames())
+	}
+	for _, fr := range f.Frames() {
+		if strings.Contains(fr, `["add",`) && strings.Contains(fr, `"id":`) {
+			t.Errorf("clone sent an id: %s", fr)
+		}
+	}
+}
+
+func TestCreateAMonitorWithATag(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("n", "enter") // HTTP
+	h.typeText("tagged")
+	h.press("tab")
+	h.typeText("https://tagged.example.com")
+	// Walk to the tag list and tick region.
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listTags); i++ {
+		h.press("tab")
+	}
+	h.send(tea.KeyMsg{Type: tea.KeySpace})
+	h.toChannels()
+	h.press("enter")
+	if !h.fakes["home"].Sent(`["addMonitorTag",4,9,""]`) {
+		t.Fatalf("tag not applied to the new monitor 9: %v", h.fakes["home"].Frames())
+	}
+}
+
+func TestATagFailureAfterCreateClosesTheForm(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.m.tagDefs["home"] = []kuma.TagDef{{ID: 13, Name: "broken", Color: "#DC2626"}}
+	h.press("n", "enter") // HTTP
+	h.typeText("half")
+	h.press("tab")
+	h.typeText("https://half.example.com")
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listTags); i++ {
+		h.press("tab")
+	}
+	h.send(tea.KeyMsg{Type: tea.KeySpace})
+	h.toChannels()
+	h.press("enter")
+
+	if !h.fakes["home"].Sent(`["add",`) {
+		t.Fatalf("monitor not sent: %v", h.fakes["home"].Frames())
+	}
+	// The monitor exists: staying on the form would invite a second one.
+	if h.m.screen != screenInstance {
+		t.Errorf("the form stayed open after the monitor was created: screen %v", h.m.screen)
+	}
+	if v := h.view(); !strings.Contains(v, "created, but tag broken") || !strings.Contains(v, "tag gone") {
+		t.Errorf("the flash does not say the monitor was created:\n%s", v)
 	}
 }
