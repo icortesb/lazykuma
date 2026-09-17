@@ -55,6 +55,7 @@ const (
 	screenName      // a group's name
 	screenTags      // an instance's tags
 	screenTag       // one tag's form
+	screenDetail    // one monitor at full size
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -93,6 +94,7 @@ type Model struct {
 	nform    nameForm
 	tags     tagsScreen
 	tform    tagForm
+	detail   detailScreen
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -203,6 +205,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inst = m.inst.pin(prev)
 		}
 		m.insts[i].st = msg.State
+		// The detail's monitor was deleted, here or in the web UI: there is
+		// nothing left to show.
+		if i == m.cur && m.screen == screenDetail {
+			if _, ok := msg.State.Monitors[m.detail.id]; !ok {
+				m.screen = screenInstance
+			}
+		}
 		// Kuma only gives the tags when asked, and a session that was not
 		// up yet when the instance opened could not answer: ask again once
 		// it is, or a clone made now would find no tags to copy.
@@ -227,6 +236,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = m.backTo
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
+		if m.screen == screenDetail {
+			if _, ok := m.current().st.Monitors[m.detail.id]; !ok {
+				m.screen = screenInstance
+			} else if strings.HasPrefix(msg.action, "cleared") {
+				// What was cleared is fetched again, for the period on screen.
+				id, period := m.detail.id, m.detail.period
+				m.detail = newDetailScreen(id)
+				m.detail.period = period
+				return m, tea.Batch(done, loadChart(m.current().inst, id, chartPeriods[period].hours), loadEvents(m.current().inst, id, 0))
+			}
+		}
 		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
 			return m, tea.Batch(done, loadTags(m.current().inst))
 		}
@@ -282,6 +302,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.backTo, m.screen = msg.from, screenMonitor
 		return m, nil
 
+	case chartLoaded:
+		if m.screen == screenDetail && m.current().name() == msg.instance {
+			m.detail = m.detail.withChart(msg)
+		}
+		return m, nil
+	case eventsLoaded:
+		if m.screen == screenDetail && m.current().name() == msg.instance {
+			m.detail = m.detail.withEvents(msg)
+		}
+		return m, nil
+
 	case loginDone:
 		return m.loginFinished(msg)
 
@@ -313,6 +344,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateIncidents(msg)
 		case screenTags:
 			return m.updateTags(msg)
+		case screenDetail:
+			return m.updateDetail(msg)
 		case screenConfirm:
 			answered, yes := m.ask.Update(msg)
 			if !answered {
@@ -443,6 +476,12 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case instTags:
 		m.tags, m.screen = tagsScreen{}, screenTags
 		cmd = loadTags(in.inst)
+	case instDetail:
+		if hasRow {
+			m.detail, m.screen = newDetailScreen(row.ID), screenDetail
+			hours := chartPeriods[m.detail.period].hours
+			return m, tea.Batch(loadChart(in.inst, row.ID, hours), loadEvents(in.inst, row.ID, 0))
+		}
 	}
 	return m, cmd
 }
@@ -581,6 +620,8 @@ func (m Model) render() string {
 		return m.chrome(m.tags.View(in.name(), m.tagDefs[in.name()], m.width, m.height-2), "")
 	case screenTag:
 		return m.chrome(m.tform.View(), "")
+	case screenDetail:
+		return m.chrome(m.detail.View(m.current().st, m.width, m.height-2), keyHintsDetail)
 	}
 
 	names := make([]string, len(m.insts))
@@ -610,8 +651,8 @@ func (m Model) chrome(body, hint string) string {
 }
 
 func helpText() string {
-	// The instance keys come from the same line the instance screen shows,
-	// so the two cannot drift apart.
+	// The instance and detail keys come from the same lines those screens
+	// show, so the two cannot drift apart.
 	var b strings.Builder
 	b.WriteString(styleHeading.Render("Keys") + "\n\n")
 	for _, r := range [][2]string{
@@ -624,10 +665,15 @@ func helpText() string {
 	} {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", styleKey.Render(fmt.Sprintf("%-8s", r[0])), styleValue.Render(r[1])))
 	}
-	b.WriteString("\n" + styleHeading.Render("On an instance") + "\n\n")
-	for _, part := range strings.Split(keyHints, "   ") {
-		if part = strings.TrimSpace(part); part != "" {
-			b.WriteString("  " + styleValue.Render(part) + "\n")
+	for _, sec := range []struct{ heading, hints string }{
+		{"On an instance", keyHints},
+		{"On a monitor's detail", keyHintsDetail},
+	} {
+		b.WriteString("\n" + styleHeading.Render(sec.heading) + "\n\n")
+		for _, part := range strings.Split(sec.hints, "   ") {
+			if part = strings.TrimSpace(part); part != "" {
+				b.WriteString("  " + styleValue.Render(part) + "\n")
+			}
 		}
 	}
 	b.WriteString("\n" + styleHeading.Render("In the field editor") + "\n\n")

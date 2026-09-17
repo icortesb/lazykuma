@@ -476,3 +476,40 @@ func endSilence(in *core.Instance, w kuma.Maintenance) tea.Cmd {
 		return actionDone{name: in.Name(), action: "ended", mon: w.Title, err: in.DeleteMaintenance(ctx, w.ID)}
 	}
 }
+
+func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	mon, ok := in.st.Monitors[m.detail.id]
+	if !ok {
+		m.screen = screenInstance
+		return m, nil
+	}
+	var act detailAction
+	var mact instAction
+	m.detail, act, mact = m.detail.Update(msg, in.st)
+	switch act {
+	case detBack:
+		m.screen = screenInstance
+	case detPeriod:
+		return m, loadChart(in.inst, mon.ID, chartPeriods[m.detail.period].hours)
+	case detMore:
+		return m, loadEvents(in.inst, mon.ID, len(m.detail.events))
+	case detMonitor:
+		// The detail's monitor as the list would give it: a monitor, never
+		// a group, so the actions take the monitor path.
+		return m.actOn(mact, state.Row{Monitor: mon, Rollup: mon.Status()}, screenDetail)
+	case detClearEvents:
+		m.ask = confirm{
+			question: fmt.Sprintf("Clear the events of %s?", mon.Name),
+			detail:   "Kuma blanks the messages of its past state changes; its uptime stays",
+		}
+		m.onYes, m.backTo, m.screen = clearEvents(in.inst, mon), screenDetail, screenConfirm
+	case detClearHistory:
+		m.ask = confirm{
+			question: fmt.Sprintf("Clear the history of %s?", mon.Name),
+			detail:   "Kuma deletes its uptime statistics and starts it again; the chart and uptime begin from now",
+		}
+		m.onYes, m.backTo, m.screen = clearHistory(in.inst, mon), screenDetail, screenConfirm
+	}
+	return m, nil
+}
