@@ -103,9 +103,11 @@ type tree struct {
 }
 
 // buildTree places every monitor exactly once. A monitor goes to the top
-// level when it has no parent, or its parent is missing or not a group, or
-// its parent chain loops; Kuma should never send the last two, but a list
-// that hides a monitor would be worse than one that misplaces it.
+// level when it has no parent, or its own parent is missing or not a group,
+// or its parent chain loops back to it; Kuma should never send the last two,
+// but a list that hides a monitor would be worse than one that misplaces it.
+// Only the direct parent counts: a subgroup whose group is gone goes to the
+// top level itself, and what is in it stays in it.
 func (in Instance) buildTree() tree {
 	t := tree{in: in, children: map[int][]int{}}
 	for id, m := range in.Monitors {
@@ -118,17 +120,26 @@ func (in Instance) buildTree() tree {
 	return t
 }
 
+// underGroup reports whether m shows under its parent. In a loop every
+// monitor on it goes to the top level, which breaks it; a monitor whose
+// chain only runs into a loop stays under its parent, which is shown.
 func (t tree) underGroup(m Monitor) bool {
-	seen := map[int]bool{m.ID: true}
-	for p := m.Parent; p != 0; {
-		parent, ok := t.in.Monitors[p]
-		if !ok || !parent.IsGroup() || seen[p] {
+	if parent, ok := t.in.Monitors[m.Parent]; m.Parent == 0 || !ok || !parent.IsGroup() {
+		return false
+	}
+	seen := map[int]bool{}
+	for p := m.Parent; p != 0 && !seen[p]; {
+		if p == m.ID {
 			return false
+		}
+		parent, ok := t.in.Monitors[p]
+		if !ok || !parent.IsGroup() {
+			break
 		}
 		seen[p] = true
 		p = parent.Parent
 	}
-	return m.Parent != 0
+	return true
 }
 
 // monitorsUnder is every non-group monitor below id.

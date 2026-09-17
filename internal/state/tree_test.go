@@ -161,6 +161,22 @@ func TestTreeSurvivesAParentCycleAndAMissingParent(t *testing.T) {
 	}
 }
 
+func TestTreeKeepsWhatIsInASubgroupWhoseGroupIsGone(t *testing.T) {
+	in := Apply(Apply(Instance{}, kuma.Connected{}, tTree), kuma.MonitorList{Monitors: map[int]kuma.Monitor{
+		// EU was in a group Kuma no longer lists; cdn is in EU.
+		4: {ID: 4, Name: "EU", Type: "group", Parent: 99, Active: true},
+		5: {ID: 5, Name: "cdn", Type: "http", URL: "https://cdn.example.com", Parent: 4, Active: true},
+		// A loop, and a monitor inside it: the loop breaks at the top level,
+		// and what only hangs from it stays where it is.
+		1: {ID: 1, Name: "a", Type: "group", Parent: 2, Active: true},
+		2: {ID: 2, Name: "b", Type: "group", Parent: 1, Active: true},
+		3: {ID: 3, Name: "inner", Type: "http", URL: "https://inner.example.com", Parent: 1, Active: true},
+	}}, tTree)
+	if got := outline(in.Tree(View{Order: OrderName})); got != "▾ a\n  inner\n▾ b\n▾ EU\n  cdn\n" {
+		t.Errorf("tree:\n%s", got)
+	}
+}
+
 func TestDescendants(t *testing.T) {
 	got := map[int]bool{}
 	for _, m := range shop().Descendants(10) {

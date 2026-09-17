@@ -335,8 +335,9 @@ func (in Instance) Counts() Counts {
 	return c
 }
 
-// Sorted is the monitors the way the list shows them: down first, then by
-// name.
+// Sorted is the monitors in a fixed order, down first, then by name: the
+// order the status report, and so watch and notify, name them in. The
+// instance screen does not use it; it shows Tree.
 func (in Instance) Sorted() []Monitor {
 	out := make([]Monitor, 0, len(in.Monitors))
 	for _, m := range in.Monitors {
