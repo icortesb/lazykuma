@@ -111,11 +111,13 @@ func beatBar(beats []kuma.Beat, width int) string {
 }
 
 // chartLine draws a monitor's history in width cells, newest on the right.
-// A cell's height is its average ping between the lowest and highest in the
-// line; a cell with only down checks sits at the bottom in red, and one with
-// some down checks is drawn in the warning colour. Neighbouring points merge
-// when there are more than cells. ok is false when no check was up, so
-// there is no ping range to speak of.
+// The cells are Kuma's buckets in order, not evenly spaced time: a span with
+// no checks, such as one the monitor spent paused, has no bucket and is not
+// drawn. A cell's height is its average ping between the lowest and highest
+// in the line; a cell with only down checks sits at the bottom in red, and
+// one with some down checks is drawn in the warning colour. Neighbouring
+// buckets merge when there are more than cells. ok is false when no check
+// was up, so there is no ping range to speak of.
 func chartLine(points []kuma.ChartPoint, width int) (line string, lo, hi float64, ok bool) {
 	if width <= 0 || len(points) == 0 {
 		return "", 0, 0, false
@@ -165,12 +167,16 @@ func chartLine(points []kuma.ChartPoint, width int) (line string, lo, hi float64
 }
 
 // pct is an uptime ratio as the detail shows it, or a dash when Kuma has
-// not said.
+// not said. A ratio short of 1 never rounds up to 100%: a failed check,
+// however rare, must not read as none.
 func pct(ratio float64, has bool) string {
 	if !has {
 		return "—"
 	}
 	s := strconv.FormatFloat(ratio*100, 'f', 1, 64)
+	if ratio < 1 && s == "100.0" {
+		s = "99.9"
+	}
 	return strings.TrimSuffix(s, ".0") + "%"
 }
 

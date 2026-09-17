@@ -99,6 +99,10 @@ func TestPct(t *testing.T) {
 	if got := pct(1, true); got != "100%" {
 		t.Errorf("pct(1) = %q", got)
 	}
+	// Short of every check up is never shown as all of them.
+	if got := pct(0.99996, true); got != "99.9%" {
+		t.Errorf("pct(0.99996) = %q", got)
+	}
 	if got := pct(0, false); got != "—" {
 		t.Errorf("pct unknown = %q", got)
 	}
