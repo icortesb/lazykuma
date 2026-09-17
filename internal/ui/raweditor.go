@@ -28,6 +28,11 @@ type rawEditor struct {
 	addingKey bool
 	input     textinputModel
 	err       string
+
+	// cloneTags are the tags of the monitor a clone was made from, to put
+	// on the new one once it is added: add ignores tags. They belong to the
+	// editor, so any other editor opened later starts without them.
+	cloneTags []kuma.Tag
 }
 
 // rawSkeleton is what a new monitor of an uncurated type starts from: the

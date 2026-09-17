@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ func typeInForm(m monitorForm, s string) monitorForm {
 }
 
 func TestNewHTTPMonitor(t *testing.T) {
-	m := newMonitorForm(kindHTTP, []channelToggle{{id: 5, name: "telegram"}})
+	m := newMonitorForm(kindHTTP, formLists{channels: []toggle{{id: 5, name: "telegram"}}})
 	m = typeInForm(m, "nextcloud")
 	m, _, _ = m.Update(keyMsg("tab"))
 	m = typeInForm(m, "https://cloud.home.lan")
@@ -45,7 +46,7 @@ func TestNewHTTPMonitor(t *testing.T) {
 }
 
 func TestMonitorFormChannels(t *testing.T) {
-	m := newMonitorForm(kindPing, []channelToggle{{id: 5, name: "telegram"}, {id: 6, name: "mail"}})
+	m := newMonitorForm(kindPing, formLists{channels: []toggle{{id: 5, name: "telegram"}, {id: 6, name: "mail"}}})
 	m = typeInForm(m, "pihole")
 	m, _, _ = m.Update(keyMsg("tab"))
 	m = typeInForm(m, "10.0.0.2")
@@ -57,11 +58,11 @@ func TestMonitorFormChannels(t *testing.T) {
 		if act == formSubmit {
 			t.Fatal("tab submitted instead of reaching the channels")
 		}
-		if m.onChans {
+		if m.inLists() {
 			break
 		}
 	}
-	if !m.onChans {
+	if !m.inLists() {
 		t.Fatal("never reached the channel list")
 	}
 	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace}) // telegram on
@@ -104,7 +105,7 @@ func TestMonitorFormRejectsBadValues(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newMonitorForm(tt.kind, nil)
+			m := newMonitorForm(tt.kind, formLists{})
 			for i, v := range tt.values {
 				if i > 0 {
 					m, _, _ = m.Update(keyMsg("tab"))
@@ -119,7 +120,7 @@ func TestMonitorFormRejectsBadValues(t *testing.T) {
 	}
 
 	// Kuma refuses anything under 20 seconds, so the form does too.
-	m := newMonitorForm(kindHTTP, nil)
+	m := newMonitorForm(kindHTTP, formLists{})
 	m = typeInForm(m, "web")
 	m, _, _ = m.Update(keyMsg("tab"))
 	m = typeInForm(m, "https://x.lan")
@@ -140,7 +141,7 @@ func TestEditKeepsEveryFieldKumaKnows(t *testing.T) {
 		"notificationIDList": map[string]any{"5": true},
 		"resendInterval":     float64(10), "httpBodyEncoding": "json", "weight": float64(2000),
 	}
-	m := editMonitorForm(mon, []channelToggle{{id: 5, name: "telegram"}, {id: 6, name: "mail"}})
+	m := editMonitorForm(mon, formLists{channels: []toggle{{id: 5, name: "telegram"}, {id: 6, name: "mail"}}})
 
 	if m.id != 3 || m.kind != "keyword" {
 		t.Fatalf("form = id %d kind %q", m.id, m.kind)
@@ -154,8 +155,8 @@ func TestEditKeepsEveryFieldKumaKnows(t *testing.T) {
 	if got := m.fields[m.index("accepted_statuscodes")].Value(); got != "200-299" {
 		t.Errorf("accepted field = %q", got)
 	}
-	if !m.channels[0].on || m.channels[1].on {
-		t.Errorf("channels = %+v", m.channels)
+	if !m.channelItems()[0].on || m.channelItems()[1].on {
+		t.Errorf("channels = %+v", m.channelItems())
 	}
 
 	out, err := m.Values()
@@ -195,7 +196,7 @@ func TestEditNeverDropsChannelsTheFormCannotSee(t *testing.T) {
 	}
 
 	// No channels known at all: both survive untouched.
-	out, err := editMonitorForm(mon, nil).Values()
+	out, err := editMonitorForm(mon, formLists{}).Values()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,8 +206,8 @@ func TestEditNeverDropsChannelsTheFormCannotSee(t *testing.T) {
 	}
 
 	// One of the two known: the other is still not this form's to remove.
-	m := editMonitorForm(mon, []channelToggle{{id: 5, name: "telegram"}})
-	if !m.channels[0].on {
+	m := editMonitorForm(mon, formLists{channels: []toggle{{id: 5, name: "telegram"}}})
+	if !m.channelItems()[0].on {
 		t.Fatal("the monitor's own channel is not ticked")
 	}
 	out, err = m.Values()
@@ -219,10 +220,173 @@ func TestEditNeverDropsChannelsTheFormCannotSee(t *testing.T) {
 	}
 
 	// Unticking the one it shows removes that one, and only that one.
-	m.channels[0].on = false
+	m.channelItems()[0].on = false
 	out, _ = m.Values()
 	ids = out["notificationIDList"].(map[string]bool)
 	if ids["5"] || !ids["9"] {
 		t.Fatalf("unticking removed the wrong channel: %v", ids)
+	}
+}
+
+func sampleLists() formLists {
+	return formLists{
+		groups:   []toggle{{id: 0, name: "No group", on: true}, {id: 1, name: "Shop"}},
+		tags:     []toggle{{id: 4, name: "region"}, {id: 5, name: "prod"}},
+		channels: []toggle{{id: 7, name: "telegram"}},
+	}
+}
+
+func TestMonitorFormGroupIsARadio(t *testing.T) {
+	m := newMonitorForm(kindHTTP, sampleLists())
+	m.fields[0].SetValue("web")
+	m.fields[1].SetValue("https://shop.example.com")
+	for i := 0; i < 8 && !m.inLists(); i++ {
+		m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if !m.inLists() || m.lists[m.list].title != listGroup {
+		t.Fatalf("tab did not reach the group list: %+v", m.list)
+	}
+	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})  // Shop
+	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace}) // choose it
+	out, err := m.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["parent"] != 1 {
+		t.Fatalf("parent = %v", out["parent"])
+	}
+	if g := m.lists[0].items; g[0].on || !g[1].on {
+		t.Fatalf("radio left two on: %+v", g)
+	}
+}
+
+func TestMonitorFormTagChanges(t *testing.T) {
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"parent": nil, "notificationIDList": map[string]any{},
+		"tags": []any{map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"}},
+	}
+	m := editMonitorForm(mon, sampleLists())
+	tags := m.lists[1]
+	if tags.title != listTags || !tags.items[0].on || tags.items[1].on {
+		t.Fatalf("tags from the monitor: %+v", tags)
+	}
+	// Untick region, tick prod.
+	m.lists[1].items[0].on = false
+	m.lists[1].items[1].on = true
+	add, remove := m.TagChanges()
+	if len(add) != 1 || add[0].ID != 5 || add[0].Value != "" {
+		t.Errorf("add = %+v", add)
+	}
+	// The removal carries the monitor's value: Kuma matches on it.
+	if len(remove) != 1 || remove[0].ID != 4 || remove[0].Value != "eu" {
+		t.Errorf("remove = %+v", remove)
+	}
+}
+
+func TestCloneFormKeepsTagsAndDropsTheID(t *testing.T) {
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com", "parent": float64(1),
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{}, "path": []any{"Shop", "web"},
+		"tags": []any{map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"}},
+	}
+	m := cloneMonitorForm(mon, sampleLists())
+	if m.id != 0 || m.fields[0].Value() != "copy of web" {
+		t.Fatalf("clone form: id %d name %q", m.id, m.fields[0].Value())
+	}
+	out, err := m.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := out["id"]; ok {
+		t.Error("clone sends an id")
+	}
+	if _, ok := out["path"]; ok {
+		t.Error("clone sends path")
+	}
+	if out["parent"] != 1 {
+		t.Errorf("parent = %v", out["parent"])
+	}
+	add, remove := m.TagChanges()
+	if len(add) != 1 || add[0].ID != 4 || add[0].Value != "eu" || len(remove) != 0 {
+		t.Errorf("clone tags: add %+v remove %+v", add, remove)
+	}
+}
+
+func TestCloneAddsTagsTheFormDidNotList(t *testing.T) {
+	// Right after startup the tag list may not be fetched yet: the form
+	// lists no tags, and the clone must still carry its source's.
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+		"tags": []any{
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"},
+			map[string]any{"tag_id": float64(9), "name": "team", "color": "#DC2626", "value": "ops"},
+		},
+	}
+	add, remove := cloneMonitorForm(mon, formLists{}).TagChanges()
+	if len(add) != 2 || add[0].ID != 4 || add[0].Value != "eu" || add[1].ID != 9 || add[1].Value != "ops" || len(remove) != 0 {
+		t.Fatalf("clone with no tag list: add %+v remove %+v", add, remove)
+	}
+
+	// Listed and unticked is the user's choice; not listed is kept.
+	m := cloneMonitorForm(mon, sampleLists())
+	m.lists[1].items[0].on = false // region
+	add, _ = m.TagChanges()
+	if len(add) != 1 || add[0].ID != 9 {
+		t.Fatalf("clone with region unticked: add %+v", add)
+	}
+}
+
+func TestATagCarriedTwice(t *testing.T) {
+	// Kuma lets a monitor carry one tag several times, with different
+	// values.
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com",
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+		"tags": []any{
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "eu"},
+			map[string]any{"tag_id": float64(4), "name": "region", "color": "#2563EB", "value": "us"},
+		},
+	}
+	add, remove := cloneMonitorForm(mon, sampleLists()).TagChanges()
+	if len(add) != 2 || add[0].Value != "eu" || add[1].Value != "us" || len(remove) != 0 {
+		t.Errorf("clone: add %+v remove %+v", add, remove)
+	}
+
+	m := editMonitorForm(mon, sampleLists())
+	if add, remove := m.TagChanges(); len(add) != 0 || len(remove) != 0 {
+		t.Errorf("untouched edit: add %+v remove %+v", add, remove)
+	}
+	m.lists[1].items[0].on = false
+	add, remove = m.TagChanges()
+	if len(add) != 0 || len(remove) != 2 || remove[0].Value != "eu" || remove[1].Value != "us" {
+		t.Errorf("unticked: add %+v remove %+v", add, remove)
+	}
+}
+
+func TestEditToNoGroupSendsANullParent(t *testing.T) {
+	mon := kuma.RawMonitor{
+		"id": float64(2), "type": "http", "name": "web", "url": "https://shop.example.com", "parent": float64(1),
+		"interval": float64(60), "maxretries": float64(0), "accepted_statuscodes": []any{"200-299"},
+		"notificationIDList": map[string]any{},
+	}
+	m := editMonitorForm(mon, sampleLists())
+	if g := m.lists[0].items; g[0].on || !g[1].on {
+		t.Fatalf("group list = %+v", g)
+	}
+	m.lists[0].items[0].on, m.lists[0].items[1].on = true, false // No group
+	out, err := m.Values()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Kuma keeps the parent it has unless it is told null.
+	b, _ := json.Marshal(out)
+	if !strings.Contains(string(b), `"parent":null`) {
+		t.Fatalf("sent %s", b)
 	}
 }

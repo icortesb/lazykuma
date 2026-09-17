@@ -2,6 +2,7 @@ package kuma
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 )
@@ -156,6 +157,182 @@ func (s *Session) SetMaintenanceMonitors(ctx context.Context, id int, monitorIDs
 // DeleteMaintenance ends a maintenance window for good.
 func (s *Session) DeleteMaintenance(ctx context.Context, id int) error {
 	r, err := s.call(ctx, "deleteMaintenance", id)
+	if err != nil {
+		return err
+	}
+	return r.err()
+}
+
+// NewGroup is a group monitor ready for AddMonitor: the fields Kuma's add
+// reads for every monitor, with a group's type. A group checks nothing; its
+// interval only paces how often Kuma recomputes it from its children.
+func NewGroup(name string) RawMonitor {
+	return RawMonitor{
+		"type": "group", "name": name, "parent": nil,
+		"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true,
+		"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
+		"conditions": []any{}, "kafkaProducerBrokers": []any{}, "kafkaProducerSaslOptions": map[string]any{},
+	}
+}
+
+// cloneDrops are the properties getMonitor returns that add would try to
+// store as columns Kuma does not have; Kuma's own clone removes the same.
+var cloneDrops = []string{
+	"id", "includeSensitiveData", "maintenance", "childrenIDs", "forceInactive",
+	"path", "pathName", "screenshot", "tags",
+}
+
+// ForClone is a copy of a whole monitor that AddMonitor accepts as a new
+// one: same settings, same group, "copy of" its name. A push monitor gets a
+// token of its own: Kuma's add stores whatever token it is given (the web UI
+// makes one in the browser), so keeping the source's would have two
+// monitors share a push URL, and dropping it would leave the clone without
+// one. The tags are not in it: add ignores them, so the caller adds them
+// after.
+func ForClone(m RawMonitor) RawMonitor {
+	out := make(RawMonitor, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	for _, k := range cloneDrops {
+		delete(out, k)
+	}
+	if out["type"] == "push" {
+		out["pushToken"] = newPushToken()
+	}
+	name, _ := m["name"].(string)
+	out["name"] = "copy of " + name
+	return out
+}
+
+// pushTokenChars and pushTokenLen match the tokens Kuma's web UI makes for a
+// push monitor, so a clone's push URL looks like any other.
+const (
+	pushTokenChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+	pushTokenLen   = 32
+)
+
+// newPushToken is a random push token. The token is the only thing that
+// authenticates a push, so it comes from crypto/rand; rand.Text is not used
+// because its alphabet is not Kuma's. Bytes at or above the largest multiple
+// of the alphabet's length are skipped, so no character is likelier than
+// another. rand.Read never returns an error: it crashes the program instead.
+func newPushToken() string {
+	limit := byte(256 - 256%len(pushTokenChars))
+	out := make([]byte, 0, pushTokenLen)
+	var buf [pushTokenLen]byte
+	for len(out) < pushTokenLen {
+		rand.Read(buf[:])
+		for _, b := range buf {
+			if b < limit && len(out) < pushTokenLen {
+				out = append(out, pushTokenChars[int(b)%len(pushTokenChars)])
+			}
+		}
+	}
+	return string(out)
+}
+
+// DeleteGroup removes a group. withMonitors deletes the monitors in it, and
+// their history, too; otherwise Kuma keeps them, outside any group.
+func (s *Session) DeleteGroup(ctx context.Context, id int, withMonitors bool) error {
+	r, err := s.call(ctx, "deleteMonitor", id, withMonitors)
+	if err != nil {
+		return err
+	}
+	return r.err()
+}
+
+// TagDef is a tag as Kuma defines it, apart from any monitor.
+type TagDef struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+// TagColor is one of the colours Kuma's own tag editor offers.
+type TagColor struct{ Name, Hex string }
+
+// TagColors is Kuma's palette, in its order, so a tag made here looks like
+// one made in the web UI.
+var TagColors = []TagColor{
+	{"gray", "#4B5563"}, {"red", "#DC2626"}, {"orange", "#D97706"}, {"green", "#059669"},
+	{"blue", "#2563EB"}, {"indigo", "#4F46E5"}, {"purple", "#7C3AED"}, {"pink", "#DB2777"},
+}
+
+// Tags is every tag this Kuma has. Kuma never pushes the list: it is asked
+// for.
+func (s *Session) Tags(ctx context.Context) ([]TagDef, error) {
+	raw, err := s.emit(ctx, "getTags")
+	if err != nil {
+		return nil, err
+	}
+	var r struct {
+		OK   bool     `json:"ok"`
+		Msg  string   `json:"msg"`
+		Tags []TagDef `json:"tags"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw[0], &r); err != nil {
+			return nil, fmt.Errorf("kuma: getTags reply: %w", err)
+		}
+	}
+	if !r.OK {
+		return nil, &ReplyError{Msg: r.Msg}
+	}
+	return r.Tags, nil
+}
+
+// AddTag creates a tag and returns it with its id.
+func (s *Session) AddTag(ctx context.Context, name, color string) (TagDef, error) {
+	raw, err := s.emit(ctx, "addTag", map[string]string{"name": name, "color": color})
+	if err != nil {
+		return TagDef{}, err
+	}
+	var r struct {
+		OK  bool   `json:"ok"`
+		Msg string `json:"msg"`
+		Tag TagDef `json:"tag"`
+	}
+	if len(raw) > 0 {
+		json.Unmarshal(raw[0], &r)
+	}
+	if !r.OK {
+		return TagDef{}, &ReplyError{Msg: r.Msg}
+	}
+	return r.Tag, nil
+}
+
+// EditTag renames or recolours a tag, on every monitor carrying it.
+func (s *Session) EditTag(ctx context.Context, t TagDef) error {
+	r, err := s.call(ctx, "editTag", t)
+	if err != nil {
+		return err
+	}
+	return r.err()
+}
+
+// DeleteTag removes a tag from Kuma and from every monitor.
+func (s *Session) DeleteTag(ctx context.Context, id int) error {
+	r, err := s.call(ctx, "deleteTag", id)
+	if err != nil {
+		return err
+	}
+	return r.err()
+}
+
+// AddMonitorTag puts a tag on a monitor, with a value that may be empty.
+func (s *Session) AddMonitorTag(ctx context.Context, tagID, monitorID int, value string) error {
+	r, err := s.call(ctx, "addMonitorTag", tagID, monitorID, value)
+	if err != nil {
+		return err
+	}
+	return r.err()
+}
+
+// DeleteMonitorTag takes a tag off a monitor. Kuma matches the value too, so
+// it must be the value the monitor carries.
+func (s *Session) DeleteMonitorTag(ctx context.Context, tagID, monitorID int, value string) error {
+	r, err := s.call(ctx, "deleteMonitorTag", tagID, monitorID, value)
 	if err != nil {
 		return err
 	}

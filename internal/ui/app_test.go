@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -90,9 +91,24 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 		case "add":
 			return map[string]any{"ok": true, "msg": "successAdded", "monitorID": 9}
 		case "getMonitor":
+			var id int
+			json.Unmarshal(args[0], &id)
+			if id == 21 {
+				// A type no form knows, carrying a tag the tag list has
+				// and one it does not.
+				return map[string]any{"ok": true, "monitor": map[string]any{
+					"id": id, "type": "dns", "name": "resolver", "hostname": "home.lan", "dns_resolve_server": "1.1.1.1",
+					"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true, "parent": nil,
+					"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
+					"tags": []map[string]any{
+						{"tag_id": 4, "monitor_id": id, "name": "region", "color": "#2563EB", "value": "eu"},
+						{"tag_id": 6, "monitor_id": id, "name": "dns", "color": "#123456", "value": ""},
+					},
+				}}
+			}
 			return map[string]any{"ok": true, "monitor": map[string]any{
-				"id": 1, "type": "http", "name": "nextcloud", "url": "https://cloud.home.lan",
-				"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true,
+				"id": id, "type": "http", "name": "nextcloud", "url": "https://cloud.home.lan",
+				"interval": 60, "retryInterval": 60, "maxretries": 0, "active": true, "parent": nil,
 				"accepted_statuscodes": []string{"200-299"}, "notificationIDList": map[string]bool{},
 			}}
 		case "editMonitor", "deleteMonitor", "addNotification", "deleteNotification",
@@ -107,6 +123,23 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			return out
 		case "testNotification":
 			return map[string]any{"ok": false, "msg": "Request failed with status code 401"}
+		case "getTags":
+			return map[string]any{"ok": true, "tags": []map[string]any{{"id": 4, "name": "region", "color": "#2563EB"}}}
+		case "addTag":
+			var tag map[string]any
+			json.Unmarshal(args[0], &tag)
+			tag["id"] = 8
+			return map[string]any{"ok": true, "tag": tag}
+		case "addMonitorTag":
+			// Tag 13 stands for one deleted in the web UI meanwhile.
+			var tagID int
+			json.Unmarshal(args[0], &tagID)
+			if tagID == 13 {
+				return map[string]any{"ok": false, "msg": "tag gone"}
+			}
+			return map[string]any{"ok": true, "msg": "Saved."}
+		case "editTag", "deleteTag", "deleteMonitorTag":
+			return map[string]any{"ok": true, "msg": "Saved."}
 		}
 		return login(event, args)
 	}
@@ -225,13 +258,13 @@ func TestOpenInstanceAndPause(t *testing.T) {
 	if !strings.Contains(h.view(), "home · 2 monitors") {
 		t.Fatalf("not on the instance:\n%s", h.view())
 	}
-	h.press("p")      // backup is first (b < n) and paused: resume it
-	h.press("j", "p") // nextcloud: pause it
+	h.press("p")      // nextcloud is first (paused ranks last): pause it
+	h.press("j", "p") // backup is paused: resume it
 	f := h.fakes["home"]
 	if !f.Sent(`["resumeMonitor",8]`) || !f.Sent(`["pauseMonitor",7]`) {
 		t.Fatalf("frames: %v", f.Frames())
 	}
-	if !strings.Contains(h.view(), "paused nextcloud") {
+	if !strings.Contains(h.view(), "resumed backup") {
 		t.Errorf("no flash:\n%s", h.view())
 	}
 	h.press("esc")
@@ -369,7 +402,7 @@ func TestHelpListsTheInstanceKeys(t *testing.T) {
 	v := h.view()
 	// The help is built from the same line the instance screen shows, so
 	// the two cannot drift apart.
-	for _, want := range []string{"n new", "d delete", "m silence", "c channels", "i incidents", "ctrl+s save", "never written here"} {
+	for _, want := range []string{"n new", "d delete", "space fold", "m silence", "c channels", "i incidents", "ctrl+s save", "never written here"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("help lacks %q:\n%s", want, v)
 		}
@@ -399,5 +432,24 @@ func TestLongDialErrorFitsAndShowsCause(t *testing.T) {
 			t.Errorf("at %d columns the cause is gone:\n%s", width, v)
 		}
 		assertFits(t, v, width)
+	}
+}
+
+func TestTagsReloadWhenTheInstanceConnects(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	// The instance opened before its session was up: the tags could not be
+	// fetched, and saying so would only be noise.
+	h.m.tagDefs = map[string][]kuma.TagDef{}
+	h.send(tagsLoaded{instance: "home", err: fmt.Errorf("tags: %w", kuma.ErrNotConnected)})
+	if strings.Contains(h.view(), "tags:") {
+		t.Errorf("a not-yet-connected session flashed:\n%s", h.view())
+	}
+	h.state("home", state.Apply(twoMonitors(), kuma.Disconnected{Err: errors.New("dial tcp: connection refused")}, tBase))
+	if len(h.m.tagDefs["home"]) != 0 {
+		t.Fatalf("tags fetched while down: %+v", h.m.tagDefs["home"])
+	}
+	h.state("home", twoMonitors()) // connected again
+	if got := h.m.tagDefs["home"]; len(got) != 1 || got[0].Name != "region" {
+		t.Fatalf("tags after connecting = %+v", got)
 	}
 }

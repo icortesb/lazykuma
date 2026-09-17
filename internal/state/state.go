@@ -306,14 +306,19 @@ func mergeBeats(old, add []kuma.Beat) []kuma.Beat {
 	return all
 }
 
-// Counts is how many monitors are in each status.
+// Counts is how many monitors are in each status. Groups are not counted:
+// they are their monitors.
 type Counts struct {
 	Total, Up, Down, Pending, Maintenance, Paused int
 }
 
 func (in Instance) Counts() Counts {
-	c := Counts{Total: len(in.Monitors)}
+	var c Counts
 	for _, m := range in.Monitors {
+		if m.IsGroup() {
+			continue // a group is its monitors, already counted
+		}
+		c.Total++
 		switch m.Status() {
 		case StatusUp:
 			c.Up++
@@ -330,8 +335,9 @@ func (in Instance) Counts() Counts {
 	return c
 }
 
-// Sorted is the monitors the way the list shows them: down first, then by
-// name.
+// Sorted is the monitors in a fixed order, down first, then by name: the
+// order the status command counts them in and names the down ones. The
+// instance screen does not use it; it shows Tree.
 func (in Instance) Sorted() []Monitor {
 	out := make([]Monitor, 0, len(in.Monitors))
 	for _, m := range in.Monitors {

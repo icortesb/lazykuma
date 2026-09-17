@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -48,7 +49,7 @@ func TestDecodeMonitorList(t *testing.T) {
 	}
 	m := ml.Monitors[1]
 	want := Monitor{ID: 1, Name: "https://example.com", Type: "http", URL: "https://example.com", Active: true, Interval: 20}
-	if m != want {
+	if !reflect.DeepEqual(m, want) {
 		t.Fatalf("monitor 1 = %+v, want %+v", m, want)
 	}
 	if m.Target() != "https://example.com" {
@@ -178,6 +179,29 @@ func TestDecodeMaintenanceList(t *testing.T) {
 	}
 	if m != want {
 		t.Errorf("maintenance = %+v, want %+v", m, want)
+	}
+}
+
+func TestDecodeMonitorGroupsAndTags(t *testing.T) {
+	// The shape Kuma 2.5.3 sends: a group, a child pointing at it with
+	// parent, and a tag whose value is null on one monitor.
+	list := `{"1":{"id":1,"name":"Shop","type":"group","parent":null,"childrenIDs":[2],"path":["Shop"],"pathName":"Shop","active":true,"tags":[]},
+	"2":{"id":2,"name":"shop.example.com","type":"http","url":"https://shop.example.com","parent":1,"childrenIDs":[],"path":["Shop","shop.example.com"],"pathName":"Shop / shop.example.com","active":1,
+	"tags":[{"tag_id":4,"monitor_id":2,"value":"eu","name":"region","color":"#2563EB"},{"tag_id":5,"monitor_id":2,"value":null,"name":"prod","color":"#DC2626"}]}}`
+	ev, ok, err := DecodeEvent("monitorList", []json.RawMessage{json.RawMessage(list)})
+	if err != nil || !ok {
+		t.Fatalf("decode: %v %v", ok, err)
+	}
+	mons := ev.(MonitorList).Monitors
+	if !mons[1].IsGroup() || mons[2].IsGroup() {
+		t.Fatalf("IsGroup: %v %v", mons[1].IsGroup(), mons[2].IsGroup())
+	}
+	if mons[2].Parent != 1 || mons[1].Parent != 0 {
+		t.Fatalf("parents: %d %d", mons[2].Parent, mons[1].Parent)
+	}
+	want := []Tag{{ID: 4, Name: "region", Color: "#2563EB", Value: "eu"}, {ID: 5, Name: "prod", Color: "#DC2626"}}
+	if !slices.Equal(mons[2].Tags, want) {
+		t.Fatalf("tags = %+v", mons[2].Tags)
 	}
 }
 

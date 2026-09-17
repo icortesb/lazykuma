@@ -42,6 +42,18 @@ default applies to monitors created afterwards.
 `m` silences a monitor while you deploy — now until you end it, or between two times — and `M`
 lists what is silenced. `i` shows when monitors went down and came back, and why.
 
+### Groups and tags
+
+Groups are Kuma's own: a group created here shows in Kuma's web UI, and the other way round.
+`g` makes one, `v` moves the monitor under the cursor into it, and `space` folds it. A group
+shows its worst monitor's state. Pausing or silencing a group covers everything in it: Kuma's own
+group pause keeps checking the monitors inside it, so lazykuma pauses the group and every monitor
+and group it contains, after asking; resuming a group resumes everything in it, including anything
+paused on its own. Deleting a group asks whether to keep its monitors.
+
+Tags are Kuma's too. `t` lists them, and a monitor's form ticks which it carries. `/` searches
+tag names and values as well as names and targets.
+
 Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
 token is tied to the URL it was issued for, not the name.
@@ -50,13 +62,22 @@ token is tied to the URL it was issued for, not the name.
 |---|---|
 | `↑/k` `↓/j` | move |
 | `enter` | open an instance, or log in to it |
-| `n` `e` `d` | create, edit or delete a monitor |
+| `space`/`enter` on a group | fold or unfold it |
+| `n` | create a monitor, in the group under the cursor |
+| `g` | create a group |
+| `e` | edit the selected monitor, or rename the selected group |
+| `d` | delete the selected monitor, or the selected group (keeping or with its monitors) |
+| `v` | move the selected monitor into a group |
+| `C` | clone the selected monitor |
 | `r` | edit the selected monitor's fields directly |
-| `p` | pause or resume the selected monitor |
-| `m` `M` | silence the selected monitor; list what is silenced |
+| `p` | pause or resume the selected monitor, or a whole group and everything in it |
+| `m` `M` | silence the selected monitor or group; list what is silenced |
+| `t` | the instance's tags |
 | `c` | the instance's notification channels |
 | `i` | the incident timeline |
-| `/` | filter |
+| `/` | search names, targets and tags |
+| `f` | show only down, up, paused or maintenance monitors |
+| `s` | sort by status, name, ping or uptime |
 | `esc` | back |
 | `?` | help |
 | `q` | quit, from the menu |

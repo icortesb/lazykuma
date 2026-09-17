@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -43,10 +45,22 @@ func writeFake(t *testing.T) (*fakeKuma, *Session) {
 			monitors[id] = m
 			return map[string]any{"ok": true, "msg": "Saved."}
 		case "deleteMonitor":
+			// Also serves DeleteGroup's three-argument form: the id is
+			// args[0] either way, and withMonitors does not matter to this
+			// fake, which never tracks group membership.
 			var id int
 			json.Unmarshal(args[0], &id)
 			delete(monitors, id)
 			return map[string]any{"ok": true, "msg": "successDeleted"}
+		case "getTags":
+			return map[string]any{"ok": true, "tags": []map[string]any{{"id": 4, "name": "region", "color": "#2563EB"}}}
+		case "addTag":
+			var tag map[string]any
+			json.Unmarshal(args[0], &tag)
+			tag["id"] = 8
+			return map[string]any{"ok": true, "tag": tag}
+		case "editTag", "deleteTag", "addMonitorTag", "deleteMonitorTag":
+			return map[string]any{"ok": true, "msg": "Saved."}
 		case "addNotification":
 			var id int
 			if len(args) > 1 {
@@ -156,6 +170,94 @@ func TestNotificationWrites(t *testing.T) {
 	var r *ReplyError
 	if !errors.As(err, &r) || r.Msg == "" {
 		t.Fatalf("TestNotification = %v, want the provider's message", err)
+	}
+}
+
+func TestTagWrites(t *testing.T) {
+	f, s := writeFake(t)
+	ctx := context.Background()
+
+	tags, err := s.Tags(ctx)
+	if err != nil || len(tags) != 1 || tags[0] != (TagDef{ID: 4, Name: "region", Color: "#2563EB"}) {
+		t.Fatalf("Tags = %+v, %v", tags, err)
+	}
+	added, err := s.AddTag(ctx, "prod", "#DC2626")
+	if err != nil || added.ID != 8 || added.Name != "prod" {
+		t.Fatalf("AddTag = %+v, %v", added, err)
+	}
+	if !f.Sent(`["addTag",{"color":"#DC2626","name":"prod"}]`) {
+		t.Errorf("addTag frame: %v", f.Frames())
+	}
+	if err := s.EditTag(ctx, TagDef{ID: 8, Name: "production", Color: "#DC2626"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddMonitorTag(ctx, 8, 2, "eu"); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Sent(`["addMonitorTag",8,2,"eu"]`) {
+		t.Errorf("addMonitorTag frame: %v", f.Frames())
+	}
+	if err := s.DeleteMonitorTag(ctx, 8, 2, "eu"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteTag(ctx, 8); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGroupWrites(t *testing.T) {
+	f, s := writeFake(t)
+	ctx := context.Background()
+	id, err := s.AddMonitor(ctx, NewGroup("Shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Sent(`"type":"group"`) || !f.Sent(`"name":"Shop"`) {
+		t.Fatalf("group not sent: %v", f.Frames())
+	}
+	if err := s.DeleteGroup(ctx, id, false); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Sent(fmt.Sprintf(`["deleteMonitor",%d,false]`, id)) {
+		t.Errorf("keep-children delete: %v", f.Frames())
+	}
+	if err := s.DeleteGroup(ctx, id, true); err != nil {
+		t.Fatal(err)
+	}
+	if !f.Sent(fmt.Sprintf(`["deleteMonitor",%d,true]`, id)) {
+		t.Errorf("delete-children delete: %v", f.Frames())
+	}
+}
+
+func TestForCloneDropsWhatAddCannotStore(t *testing.T) {
+	src := RawMonitor{
+		"id": float64(3), "name": "web", "type": "push", "pushToken": "abc", "parent": float64(1),
+		"includeSensitiveData": true, "maintenance": false, "childrenIDs": []any{}, "forceInactive": false,
+		"path": []any{"web"}, "pathName": "web", "screenshot": nil, "tags": []any{},
+		"notificationIDList": map[string]any{"5": true},
+	}
+	got := ForClone(src)
+	for _, k := range []string{"id", "includeSensitiveData", "maintenance", "childrenIDs", "forceInactive", "path", "pathName", "screenshot", "tags"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("clone keeps %q", k)
+		}
+	}
+	if got["name"] != "copy of web" || got["parent"] != float64(1) || got["notificationIDList"] == nil {
+		t.Errorf("clone = %v", got)
+	}
+	// A push clone needs a token of its own: add stores what it is given.
+	token, _ := got["pushToken"].(string)
+	if len(token) != 32 || token == src["pushToken"] || strings.Trim(token, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789") != "" {
+		t.Errorf("clone pushToken = %q", token)
+	}
+	if again, _ := ForClone(src)["pushToken"].(string); again == token {
+		t.Errorf("two clones share pushToken %q", token)
+	}
+	if _, ok := src["id"]; !ok || src["pushToken"] != "abc" {
+		t.Error("ForClone changed its argument")
+	}
+	if _, ok := ForClone(RawMonitor{"type": "http", "name": "web"})["pushToken"]; ok {
+		t.Error("an http clone got a pushToken")
 	}
 }
 

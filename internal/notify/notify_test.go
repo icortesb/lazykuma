@@ -291,6 +291,26 @@ func TestDeletedMonitorIsForgotten(t *testing.T) {
 	}
 }
 
+func TestAGroupIsNotReportedOnTopOfItsMonitor(t *testing.T) {
+	tr := NewTracker(config.NotifyDown)
+	mk := func(st kuma.Status) state.Instance {
+		in := state.Apply(state.Instance{}, kuma.Connected{}, t0)
+		in = state.Apply(in, kuma.MonitorList{Monitors: map[int]kuma.Monitor{
+			1: {ID: 1, Name: "Shop", Type: "group", Active: true},
+			2: {ID: 2, Name: "web", Parent: 1, Active: true},
+		}}, t0)
+		for _, id := range []int{1, 2} {
+			in = state.Apply(in, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: id, Status: st, Time: t0}}, t0)
+		}
+		return in
+	}
+	tr.Observe("home", mk(kuma.StatusUp), t0)
+	ev := tr.Observe("home", mk(kuma.StatusDown), t0)
+	if len(ev) != 1 || ev[0].Monitor != "web" {
+		t.Fatalf("events = %+v", ev)
+	}
+}
+
 func TestEventText(t *testing.T) {
 	down := Event{Instance: "home", Monitor: "web", Down: true, Cause: "connect ECONNREFUSED", Time: t0}
 	if down.Title() != "✖ web is down" || down.Body() != "on home · connect ECONNREFUSED" {

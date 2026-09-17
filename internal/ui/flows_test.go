@@ -26,10 +26,10 @@ func onInstance(t *testing.T, st state.Instance) *harness {
 // list that sits after the fields.
 func (h *harness) toChannels() {
 	h.t.Helper()
-	for i := 0; i < 12 && !h.m.mform.onChans; i++ {
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listChannels); i++ {
 		h.press("tab")
 	}
-	if !h.m.mform.onChans {
+	if !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listChannels) {
 		h.t.Fatal("never reached the channel list")
 	}
 }
@@ -59,7 +59,7 @@ func TestCreateAMonitorThroughTheUI(t *testing.T) {
 	h.typeText("https://pi.home.lan")
 	h.toChannels() // past interval, retries and accept
 	// The default channel comes ticked, as Kuma's own form does.
-	if !h.m.mform.channels[0].on {
+	if !h.m.mform.channelItems()[0].on {
 		t.Fatal("the default channel is not ticked")
 	}
 	h.press("enter") // save
@@ -263,5 +263,158 @@ func TestALateMonitorFromAnotherInstanceIsIgnored(t *testing.T) {
 	h.send(monitorLoaded{instance: "elsewhere", mon: kuma.RawMonitor{"id": float64(1), "type": "http", "name": "x"}})
 	if h.m.screen != screenInstance {
 		t.Fatalf("a foreign monitor opened screen %v", h.m.screen)
+	}
+}
+
+func TestCloneAMonitorThroughTheUI(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("C") // nextcloud
+	if v := h.view(); !strings.Contains(v, "Clone of nextcloud") || !strings.Contains(v, "copy of nextcloud") {
+		t.Fatalf("no clone form:\n%s", v)
+	}
+	h.toChannels()
+	h.press("enter")
+	f := h.fakes["home"]
+	if !f.Sent(`["add",`) || !f.Sent(`"name":"copy of nextcloud"`) {
+		t.Fatalf("clone not sent: %v", f.Frames())
+	}
+	for _, fr := range f.Frames() {
+		if strings.Contains(fr, `["add",`) && strings.Contains(fr, `"id":`) {
+			t.Errorf("clone sent an id: %s", fr)
+		}
+	}
+}
+
+func TestCreateAMonitorWithATag(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("n", "enter") // HTTP
+	h.typeText("tagged")
+	h.press("tab")
+	h.typeText("https://tagged.example.com")
+	// Walk to the tag list and tick region.
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listTags); i++ {
+		h.press("tab")
+	}
+	h.send(tea.KeyMsg{Type: tea.KeySpace})
+	h.toChannels()
+	h.press("enter")
+	if !h.fakes["home"].Sent(`["addMonitorTag",4,9,""]`) {
+		t.Fatalf("tag not applied to the new monitor 9: %v", h.fakes["home"].Frames())
+	}
+}
+
+func TestATagFailureAfterCreateClosesTheForm(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.m.tagDefs["home"] = []kuma.TagDef{{ID: 13, Name: "broken", Color: "#DC2626"}}
+	h.press("n", "enter") // HTTP
+	h.typeText("half")
+	h.press("tab")
+	h.typeText("https://half.example.com")
+	for i := 0; i < 16 && !(h.m.mform.inLists() && h.m.mform.lists[h.m.mform.list].title == listTags); i++ {
+		h.press("tab")
+	}
+	h.send(tea.KeyMsg{Type: tea.KeySpace})
+	h.toChannels()
+	h.press("enter")
+
+	if !h.fakes["home"].Sent(`["add",`) {
+		t.Fatalf("monitor not sent: %v", h.fakes["home"].Frames())
+	}
+	// The monitor exists: staying on the form would invite a second one.
+	if h.m.screen != screenInstance {
+		t.Errorf("the form stayed open after the monitor was created: screen %v", h.m.screen)
+	}
+	if v := h.view(); !strings.Contains(v, "created, but tag broken") || !strings.Contains(v, "tag gone") {
+		t.Errorf("the flash does not say the monitor was created:\n%s", v)
+	}
+}
+
+func TestCloneAnUncuratedMonitorKeepsItsTags(t *testing.T) {
+	h := onInstance(t, withMonitors(map[int]kuma.Monitor{
+		21: {ID: 21, Name: "resolver", Type: "dns", Hostname: "home.lan", Active: true},
+	}))
+	h.press("C")
+	if h.m.screen != screenRaw || !strings.Contains(h.view(), "copy of resolver") {
+		t.Fatalf("no field editor for the clone:\n%s", h.view())
+	}
+	h.send(tea.KeyMsg{Type: tea.KeyCtrlS})
+	f := h.fakes["home"]
+	added, tagged := -1, map[string]int{}
+	for i, fr := range f.Frames() {
+		switch {
+		case strings.Contains(fr, `["add",`):
+			added = i
+		case strings.Contains(fr, `["addMonitorTag",4,9,"eu"]`):
+			tagged["region"] = i
+		case strings.Contains(fr, `["addMonitorTag",6,9,""]`):
+			tagged["dns"] = i
+		}
+	}
+	if added < 0 || len(tagged) != 2 || tagged["region"] < added || tagged["dns"] < added {
+		t.Fatalf("the clone's tags did not follow its add: %v", f.Frames())
+	}
+
+	// A new monitor typed in the field editor afterwards carries none of them.
+	h.press("n", "j", "j", "j", "j", "enter", "enter")
+	if h.m.screen != screenRaw || len(h.m.raw.cloneTags) != 0 {
+		t.Fatalf("a later field editor kept the clone's tags: %+v", h.m.raw.cloneTags)
+	}
+}
+
+func TestAReorderKeepsKeysOnTheHighlightedMonitor(t *testing.T) {
+	st := func(down int, pings map[int]float64) state.Instance {
+		in := withMonitors(map[int]kuma.Monitor{
+			1: {ID: 1, Name: "alpha", Type: "http", URL: "https://alpha.example.com", Active: true},
+			2: {ID: 2, Name: "beta", Type: "http", URL: "https://beta.example.com", Active: true},
+		})
+		for id, p := range pings {
+			status := kuma.StatusUp
+			if id == down {
+				status = kuma.StatusDown
+			}
+			in = state.Apply(in, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: id, Status: status, Ping: p, HasPing: true, Time: tBase}}, tBase)
+		}
+		return in
+	}
+	h := onInstance(t, st(0, map[int]float64{1: 50, 2: 100}))
+	// Nothing chosen yet: alpha is on top by name. beta goes down and
+	// takes the top row between the frame and the key.
+	h.state("home", st(2, map[int]float64{1: 50, 2: 100}))
+	h.press("p")
+	f := h.fakes["home"]
+	if !f.Sent(`["pauseMonitor",1]`) || f.Sent(`["pauseMonitor",2]`) {
+		t.Fatalf("p did not act on alpha: %v", f.Frames())
+	}
+
+	// By ping, with beta chosen: alpha slows down past it.
+	h.state("home", st(0, map[int]float64{1: 50, 2: 100}))
+	h.press("s", "s") // status → name → ping
+	h.press("k")      // beta, the slowest
+	if row, _ := h.m.inst.selectedRow(h.m.current().st); row.Name != "beta" {
+		t.Fatalf("highlighted %q", row.Name)
+	}
+	h.state("home", st(0, map[int]float64{1: 200, 2: 100}))
+	if row, _ := h.m.inst.selectedRow(h.m.current().st); row.Name != "beta" {
+		t.Fatalf("after the reorder the cursor is on %q", row.Name)
+	}
+	h.press("p")
+	if !f.Sent(`["pauseMonitor",2]`) {
+		t.Fatalf("p did not act on beta: %v", f.Frames())
+	}
+}
+
+func TestATagFailureAfterARawCloneClosesTheEditor(t *testing.T) {
+	h := onInstance(t, withMonitors(map[int]kuma.Monitor{
+		21: {ID: 21, Name: "resolver", Type: "dns", Hostname: "home.lan", Active: true},
+	}))
+	h.press("C")
+	h.m.raw.cloneTags = []kuma.Tag{{ID: 13, Name: "broken"}}
+	h.send(tea.KeyMsg{Type: tea.KeyCtrlS})
+	// The clone exists: staying in the editor would invite a second one.
+	if h.m.screen != screenInstance {
+		t.Fatalf("the editor stayed open after the clone was created: screen %v", h.m.screen)
+	}
+	if v := h.view(); !strings.Contains(v, "created, but tag broken") {
+		t.Errorf("the flash does not say the clone was created:\n%s", v)
 	}
 }

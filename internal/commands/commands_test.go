@@ -145,6 +145,22 @@ func TestStatusSomethingDown(t *testing.T) {
 	}
 }
 
+func TestStatusDoesNotCountGroups(t *testing.T) {
+	c, fakes := running(t, "", "home")
+	waitConnected(t, c, "home")
+	fakes["home"].Push(`42["monitorList",{"1":{"id":1,"name":"Shop","type":"group","active":true},"2":{"id":2,"name":"web","type":"http","parent":1,"active":true}}]`)
+	beat(fakes["home"], 1, 0, 1, "Child inaccessible")
+	beat(fakes["home"], 2, 0, 2, "connect ECONNREFUSED")
+
+	var out bytes.Buffer
+	if code := Status(context.Background(), c, 3*time.Second, false, &out); code != ExitDown {
+		t.Fatalf("exit %d, output %q", code, out.String())
+	}
+	if !strings.HasPrefix(out.String(), "1 down: web\n") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
 func TestStatusEscapesMarkup(t *testing.T) {
 	c, fakes := running(t, "", "home")
 	waitConnected(t, c, "home")

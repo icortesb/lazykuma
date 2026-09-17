@@ -231,6 +231,9 @@ func settled(snap map[string]state.Instance) bool {
 				return false // connected, but the monitor list has not arrived
 			}
 			for _, m := range st.Monitors {
+				if m.IsGroup() {
+					continue
+				}
 				if m.Status() == state.StatusUnknown {
 					return false
 				}
@@ -267,6 +270,9 @@ func summarize(snap map[string]state.Instance) Report {
 		}
 		r.Reachable++
 		for _, m := range st.Sorted() {
+			if m.IsGroup() {
+				continue
+			}
 			switch m.Status() {
 			case state.StatusUp:
 				r.Up++

@@ -19,7 +19,7 @@ func typeInSilence(s silenceForm, text string) silenceForm {
 }
 
 func TestSilenceNowUntilEnded(t *testing.T) {
-	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}})
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}}, []int{1})
 	title, start, end, err := s.Values()
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +34,7 @@ func TestSilenceNowUntilEnded(t *testing.T) {
 }
 
 func TestSilenceWindow(t *testing.T) {
-	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}})
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "nextcloud"}}, []int{1})
 	s, _, _ = s.Update(keyMsg("tab"))
 	s = typeInSilence(s, "2026-09-12 15:00")
 	s, _, _ = s.Update(keyMsg("tab"))
@@ -63,7 +63,7 @@ func TestSilenceFormRejectsBadWindows(t *testing.T) {
 		{"2026-09-12 17:00", "2026-09-12 15:00", "ends before it starts"},
 	}
 	for _, tt := range tests {
-		s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}})
+		s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}}, []int{1})
 		s, _, _ = s.Update(keyMsg("tab"))
 		s = typeInSilence(s, tt.from)
 		s, _, _ = s.Update(keyMsg("tab"))
@@ -73,7 +73,7 @@ func TestSilenceFormRejectsBadWindows(t *testing.T) {
 		}
 	}
 
-	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}})
+	s := newSilenceForm(state.Monitor{Monitor: kuma.Monitor{ID: 1, Name: "web"}}, []int{1})
 	s.fields[0].SetValue("")
 	if _, _, _, err := s.Values(); err == nil || !strings.Contains(err.Error(), "title is empty") {
 		t.Errorf("empty title = %v", err)

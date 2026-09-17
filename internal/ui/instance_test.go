@@ -77,8 +77,7 @@ func TestInstanceViewWide(t *testing.T) {
 func TestInstanceDetail(t *testing.T) {
 	s := newInstanceScreen()
 	in := homelab()
-	s, _, _ = s.Update(keyMsg("j"), in) // vaultwarden → backup-s3 (b < n)
-	s, _, _ = s.Update(keyMsg("j"), in) // → nextcloud
+	s, _, _ = s.Update(keyMsg("j"), in) // vaultwarden → nextcloud
 	out := ansi.Strip(s.View("home", in, 120, 30))
 	for _, want := range []string{"https://cloud.home.lan", "up · 99.8% 24h · cert 61 days", "42ms", "200 - OK"} {
 		if !strings.Contains(out, want) {
@@ -102,7 +101,7 @@ func TestInstanceFilter(t *testing.T) {
 	for _, r := range "cloud" {
 		s, _, _ = s.Update(keyMsg(string(r)), in)
 	}
-	if got := s.visible(in); len(got) != 1 || got[0].Name != "nextcloud" {
+	if got := s.rows(in); len(got) != 1 || got[0].Name != "nextcloud" {
 		t.Fatalf("visible = %v", got)
 	}
 	s, _, _ = s.Update(keyMsg("enter"), in) // keep the filter, back to the list
@@ -111,8 +110,12 @@ func TestInstanceFilter(t *testing.T) {
 	}
 	// esc clears the filter before it leaves the screen.
 	s, act, _ := s.Update(keyMsg("esc"), in)
-	if act != instNone || len(s.visible(in)) != 4 {
-		t.Fatalf("esc: action %v, %d visible", act, len(s.visible(in)))
+	if act != instNone || len(s.rows(in)) != 4 {
+		t.Fatalf("esc: action %v, %d visible", act, len(s.rows(in)))
+	}
+	// The monitor the search found stays under the cursor.
+	if m, _ := s.selected(in); m.Name != "nextcloud" {
+		t.Errorf("after clearing the search: %q", m.Name)
 	}
 	if _, act, _ = s.Update(keyMsg("esc"), in); act != instBack {
 		t.Fatalf("second esc = %v, want back", act)
@@ -143,6 +146,112 @@ func TestInstanceStaleNotice(t *testing.T) {
 	}
 }
 
+// projects is an instance with a group of two and a loose monitor.
+func projects() state.Instance {
+	in := state.Apply(state.Instance{}, kuma.Connected{}, tBase)
+	in = state.Apply(in, kuma.MonitorList{Monitors: map[int]kuma.Monitor{
+		1: {ID: 1, Name: "Shop", Type: "group", Active: true},
+		2: {ID: 2, Name: "web", Type: "http", URL: "https://shop.example.com", Parent: 1, Active: true,
+			Tags: []kuma.Tag{{ID: 4, Name: "prod", Color: "#DC2626"}, {ID: 5, Name: "region", Color: "#2563EB", Value: "eu"}}},
+		3: {ID: 3, Name: "api", Type: "http", URL: "https://api.example.com", Parent: 1, Active: true},
+		9: {ID: 9, Name: "status", Type: "http", URL: "https://status.example.com", Active: true},
+	}}, tBase)
+	for id, st := range map[int]kuma.Status{2: kuma.StatusUp, 3: kuma.StatusDown, 9: kuma.StatusUp} {
+		in = state.Apply(in, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: id, Status: st, Ping: 80, HasPing: st == kuma.StatusUp, Time: tBase}}, tBase)
+	}
+	return in
+}
+
+func TestInstanceShowsGroups(t *testing.T) {
+	out := ansi.Strip(newInstanceScreen().View("home", projects(), 120, 30))
+	for _, want := range []string{"home · 3 monitors", "▾ Shop", "  ✖ api", "  ● web", "● status"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("view lacks %q:\n%s", want, out)
+		}
+	}
+	assertFits(t, out, 120)
+}
+
+func TestInstanceFoldsAGroup(t *testing.T) {
+	s := newInstanceScreen()
+	in := projects()
+	s, _, _ = s.Update(tea.KeyMsg{Type: tea.KeySpace}, in) // the cursor starts on Shop
+	out := ansi.Strip(s.View("home", in, 120, 30))
+	if !strings.Contains(out, "▸ Shop") || strings.Contains(out, "api") {
+		t.Fatalf("not folded:\n%s", out)
+	}
+	if !strings.Contains(out, "(2)") {
+		t.Errorf("a folded group does not say how many it holds:\n%s", out)
+	}
+	s, _, _ = s.Update(keyMsg("enter"), in) // enter on a group folds too
+	if strings.Contains(ansi.Strip(s.View("home", in, 120, 30)), "▸ Shop") {
+		t.Fatal("enter did not unfold")
+	}
+}
+
+func TestInstanceShowAndSortCycle(t *testing.T) {
+	s := newInstanceScreen()
+	in := projects()
+	s, _, _ = s.Update(keyMsg("f"), in) // all → down
+	rows := s.rows(in)
+	if len(rows) != 2 || rows[1].Name != "api" {
+		t.Fatalf("show down: %+v", rows)
+	}
+	if out := ansi.Strip(s.View("home", in, 120, 30)); !strings.Contains(out, "show down") {
+		t.Errorf("header does not say the filter:\n%s", out)
+	}
+	s, _, _ = s.Update(keyMsg("s"), in) // status → name
+	if out := ansi.Strip(s.View("home", in, 120, 30)); !strings.Contains(out, "sort name") {
+		t.Errorf("header does not say the sort:\n%s", out)
+	}
+}
+
+func TestInstanceSearchesTags(t *testing.T) {
+	s := newInstanceScreen()
+	in := projects()
+	s, _, _ = s.Update(keyMsg("/"), in)
+	for _, r := range "eu" {
+		s, _, _ = s.Update(keyMsg(string(r)), in)
+	}
+	rows := s.rows(in)
+	if len(rows) != 2 || rows[1].Name != "web" {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
+func TestInstanceDetailShowsTagsAndGroups(t *testing.T) {
+	s := newInstanceScreen()
+	in := projects()
+	out := ansi.Strip(s.View("home", in, 120, 30)) // Shop selected
+	if !strings.Contains(out, "group · 2 monitors") || !strings.Contains(out, "1 up · 1 down") {
+		t.Errorf("group detail:\n%s", out)
+	}
+	s, _, _ = s.Update(keyMsg("j"), in) // api
+	s, _, _ = s.Update(keyMsg("j"), in) // web
+	out = ansi.Strip(s.View("home", in, 120, 30))
+	if !strings.Contains(out, "prod") || !strings.Contains(out, "region:eu") {
+		t.Errorf("tags missing:\n%s", out)
+	}
+}
+
+func TestInstanceGroupActions(t *testing.T) {
+	s := newInstanceScreen()
+	in := projects()
+	for key, want := range map[string]instAction{"g": instNewGroup, "v": instMove, "t": instTags} {
+		if _, act, _ := s.Update(keyMsg(key), in); act != want {
+			t.Errorf("%s = %v, want %v", key, act, want)
+		}
+	}
+	// Clone is for monitors, not groups.
+	if _, act, _ := s.Update(keyMsg("C"), in); act != instNone {
+		t.Errorf("C on a group = %v", act)
+	}
+	s, _, _ = s.Update(keyMsg("j"), in)
+	if _, act, _ := s.Update(keyMsg("C"), in); act != instClone {
+		t.Errorf("C on a monitor = %v", act)
+	}
+}
+
 // assertFits fails when a line of out is wider than width.
 func assertFits(t *testing.T, out string, width int) {
 	t.Helper()
@@ -150,5 +259,29 @@ func assertFits(t *testing.T, out string, width int) {
 		if w := lipgloss.Width(line); w > width {
 			t.Errorf("line %d is %d wide, over %d: %q", i, w, width, line)
 		}
+	}
+}
+
+func TestInstanceSortAndShowKeepTheSelection(t *testing.T) {
+	in := homelab() // vaultwarden (down), nextcloud, pihole, backup-s3 (paused)
+	s := newInstanceScreen()
+	s, _, _ = s.Update(keyMsg("j"), in)
+	s, _, _ = s.Update(keyMsg("k"), in) // vaultwarden
+	s, _, _ = s.Update(keyMsg("s"), in) // by name it is last
+	if m, _ := s.selected(in); m.Name != "vaultwarden" {
+		t.Errorf("after s: %q", m.Name)
+	}
+
+	// pihole down too: pihole, vaultwarden, nextcloud, backup-s3.
+	in = state.Apply(in, kuma.Heartbeat{Beat: kuma.Beat{MonitorID: 2, Status: kuma.StatusDown, Time: tBase.Add(time.Hour)}}, tBase.Add(time.Hour))
+	s = newInstanceScreen()
+	s, _, _ = s.Update(keyMsg("j"), in) // vaultwarden
+	s, _, _ = s.Update(keyMsg("f"), in) // down: pihole, vaultwarden
+	if m, _ := s.selected(in); m.Name != "vaultwarden" {
+		t.Errorf("show down: %q", m.Name)
+	}
+	s, _, _ = s.Update(keyMsg("f"), in) // up: vaultwarden is not shown
+	if m, _ := s.selected(in); m.Name != "nextcloud" {
+		t.Errorf("show up: %q", m.Name)
 	}
 }

@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -19,20 +20,39 @@ const actionTimeout = 45 * time.Second
 // current is the instance the screens are working on.
 func (m Model) current() instance { return m.insts[m.cur] }
 
-// channelToggles is the instance's channels. A new monitor starts with the
-// default ones ticked, which is what Kuma's own form does and what the ★ in
-// the channels list promises; an edit has its own ticked by the caller.
-func (m Model) newChannelToggles() []channelToggle {
-	return m.channelToggles(true)
-}
-
-func (m Model) channelToggles(tickDefaults bool) []channelToggle {
-	st := m.current().st
-	out := make([]channelToggle, 0, len(st.Channels))
-	for _, c := range st.Channels {
-		out = append(out, channelToggle{id: c.ID, name: c.Name, on: tickDefaults && c.IsDefault})
+// formLists is what a monitor form offers on this instance. A new monitor
+// starts in the given group and with the default channels ticked, which is
+// what Kuma's own form does and what the ★ in the channels list promises; an
+// edit has its own ticked by editMonitorForm.
+func (m Model) formLists(parent int, forEdit bool) formLists {
+	in := m.current()
+	var out formLists
+	out.groups = []toggle{{id: 0, name: "No group", on: parent == 0}}
+	// No monitor has id 0, so this skips no group.
+	for _, o := range groupOptions(in.st, state.Monitor{})[1:] {
+		id, _ := strconv.Atoi(o.value)
+		out.groups = append(out.groups, toggle{id: id, name: o.label, on: id == parent})
+	}
+	for _, t := range m.tagDefs[in.name()] {
+		out.tags = append(out.tags, toggle{id: t.ID, name: t.Name})
+	}
+	for _, c := range in.st.Channels {
+		out.channels = append(out.channels, toggle{id: c.ID, name: c.Name, on: !forEdit && c.IsDefault})
 	}
 	return out
+}
+
+// newParent is the group a new monitor starts in: the one under the
+// cursor, or the group of the monitor under it.
+func (m Model) newParent() int {
+	r, ok := m.inst.selectedRow(m.current().st)
+	switch {
+	case !ok:
+		return 0
+	case r.Group:
+		return r.ID
+	}
+	return r.Parent
 }
 
 // openMonitorForm shows the curated form for a type, or the field editor
@@ -53,7 +73,7 @@ func (m Model) openMonitorForm(kind string) (Model, tea.Cmd) {
 		m.picking, m.screen = "rawtype", screenPick
 		return m, nil
 	}
-	m.mform = newMonitorForm(kind, m.newChannelToggles())
+	m.mform = newMonitorForm(kind, m.formLists(m.newParent(), false))
 	m.backTo, m.screen = screenInstance, screenMonitor
 	return m, nil
 }
@@ -70,7 +90,11 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "monitor":
 			return m.openMonitorForm(value)
 		case "rawtype":
-			m.raw = newRawEditor("monitor", 0, rawSkeleton(value))
+			skeleton := rawSkeleton(value)
+			if parent := m.newParent(); parent != 0 {
+				skeleton["parent"] = parent
+			}
+			m.raw = newRawEditor("monitor", 0, skeleton)
 			m.backTo, m.screen = screenInstance, screenRaw
 		case "channel":
 			if value == "other" {
@@ -80,9 +104,97 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.cform = newChannelForm(value)
 			m.backTo, m.screen = screenChannels, screenChannel
+		case "move":
+			// The picker closes as the write goes: a second enter must not
+			// send it again, and its result must not close a later screen.
+			parent, _ := strconv.Atoi(value)
+			m.screen = m.backTo
+			return m, moveMonitor(m.current().inst, m.moving, parent)
+		case "delgroup":
+			g := m.moving
+			switch value {
+			case "keep":
+				m.screen = m.backTo
+				return m, deleteGroup(m.current().inst, g, false)
+			case "all":
+				m.ask = confirm{
+					question: fmt.Sprintf("Delete %s and its %s?", g.Name, monitors(countMonitors(m.current().st, g))),
+					detail:   "Kuma removes every monitor in the group and all of their history",
+				}
+				m.onYes, m.backTo, m.screen = deleteGroup(m.current().inst, g, true), screenInstance, screenConfirm
+				return m, nil
+			}
+			m.screen = screenInstance
 		}
 	}
 	return m, nil
+}
+
+func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.nform, act, cmd = m.nform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		name, err := m.nform.Value()
+		if err != nil {
+			m.nform.err = err.Error()
+			return m, nil
+		}
+		if m.nform.id == 0 {
+			return m, addGroup(m.current().inst, name)
+		}
+		return m, renameGroup(m.current().inst, m.nform.id, name)
+	}
+	return m, cmd
+}
+
+func (m Model) updateTags(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	tags := m.tagDefs[in.name()]
+	var act tagAction
+	m.tags, act = m.tags.Update(msg, tags)
+	switch act {
+	case tagBack:
+		m.screen = screenInstance
+	case tagNew:
+		m.tform = newTagForm(kuma.TagDef{Color: kuma.TagColors[0].Hex})
+		m.backTo, m.screen = screenTags, screenTag
+	case tagEdit:
+		if t, ok := m.tags.selected(tags); ok {
+			m.tform = newTagForm(t)
+			m.backTo, m.screen = screenTags, screenTag
+		}
+	case tagDelete:
+		if t, ok := m.tags.selected(tags); ok {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the tag %q?", t.Name),
+				detail:   "Kuma takes it off every monitor that carries it",
+			}
+			m.onYes, m.backTo, m.screen = deleteTag(in.inst, t), screenTags, screenConfirm
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updateTagForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.tform, act, cmd = m.tform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		t, err := m.tform.Values()
+		if err != nil {
+			m.tform.err = err.Error()
+			return m, nil
+		}
+		return m, saveTag(m.current().inst, t)
+	}
+	return m, cmd
 }
 
 func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -98,7 +210,8 @@ func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mform.err = err.Error()
 			return m, nil
 		}
-		return m, saveMonitor(m.current().inst, mon, m.mform.id)
+		add, remove := m.mform.TagChanges()
+		return m, saveMonitor(m.current().inst, mon, m.mform.id, add, remove)
 	}
 	return m, cmd
 }
@@ -119,7 +232,11 @@ func (m Model) updateRaw(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.raw.what == "channel" {
 			return m, saveChannel(m.current().inst, values, m.raw.id)
 		}
-		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id)
+		var addTags []kuma.Tag
+		if m.raw.id == 0 {
+			addTags = m.raw.cloneTags
+		}
+		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil)
 	}
 	return m, cmd
 }
@@ -211,7 +328,7 @@ func (m Model) updateSilence(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The monitor was chosen when the form opened: the list can reorder
 		// underneath while the times are typed.
-		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, start, end)
+		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end)
 	}
 	return m, cmd
 }
@@ -248,26 +365,55 @@ func (m Model) updateIncidents(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // loadMonitor fetches the whole monitor: Kuma replaces a monitor with what
 // an edit sends, so an edit must start from everything it holds.
-func loadMonitor(in *core.Instance, id int, toRaw bool) tea.Cmd {
+func loadMonitor(in *core.Instance, id int, mode loadMode) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		mon, err := in.GetMonitor(ctx, id)
-		return monitorLoaded{instance: in.Name(), mon: mon, toRaw: toRaw, err: err}
+		return monitorLoaded{instance: in.Name(), mon: mon, mode: mode, err: err}
 	}
 }
 
-func saveMonitor(in *core.Instance, mon kuma.RawMonitor, id int) tea.Cmd {
+// saveMonitor creates a monitor, or edits the one with id, and then puts
+// on and takes off its tags.
+func saveMonitor(in *core.Instance, mon kuma.RawMonitor, id int, addTags, removeTags []kuma.Tag) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		name := fieldText(mon["name"])
+		action := "saved"
 		if id == 0 {
-			_, err := in.AddMonitor(ctx, mon)
-			return actionDone{name: in.Name(), action: "created", mon: name, err: err}
+			action = "created"
+			newID, err := in.AddMonitor(ctx, mon)
+			if err != nil {
+				return actionDone{name: in.Name(), action: action, mon: name, err: err}
+			}
+			id = newID
+		} else {
+			mon["id"] = float64(id)
+			if err := in.EditMonitor(ctx, mon); err != nil {
+				return actionDone{name: in.Name(), action: action, mon: name, err: err}
+			}
 		}
-		mon["id"] = float64(id)
-		return actionDone{name: in.Name(), action: "saved", mon: name, err: in.EditMonitor(ctx, mon)}
+		// The monitor is saved; its tags are separate calls. A failure here
+		// says so rather than pretending the save failed. The reason is
+		// shortened here, not wrapped: the flash shortens an error to its
+		// innermost cause, which would drop that the monitor was saved.
+		tagFailed := func(t kuma.Tag, err error) actionDone {
+			return actionDone{name: in.Name(), action: action, mon: name, saved: true,
+				err: fmt.Errorf("%s, but tag %s: %s", action, t.Name, kuma.Brief(err))}
+		}
+		for _, t := range addTags {
+			if err := in.AddMonitorTag(ctx, t.ID, id, t.Value); err != nil {
+				return tagFailed(t, err)
+			}
+		}
+		for _, t := range removeTags {
+			if err := in.DeleteMonitorTag(ctx, t.ID, id, t.Value); err != nil {
+				return tagFailed(t, err)
+			}
+		}
+		return actionDone{name: in.Name(), action: action, mon: name}
 	}
 }
 
@@ -314,11 +460,11 @@ func testChannel(in *core.Instance, c kuma.Notification) tea.Cmd {
 	}
 }
 
-func silenceMonitor(in *core.Instance, title string, mon state.Monitor, start, end time.Time) tea.Cmd {
+func silenceMonitor(in *core.Instance, title string, mon state.Monitor, ids []int, start, end time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		_, err := in.Silence(ctx, title, []int{mon.ID}, start, end)
+		_, err := in.Silence(ctx, title, ids, start, end)
 		return actionDone{name: in.Name(), action: "silenced", mon: mon.Name, err: err}
 	}
 }
