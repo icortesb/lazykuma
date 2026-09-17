@@ -97,16 +97,20 @@ type tagForm struct {
 	id      int
 	color   int  // index into kuma.TagColors
 	onColor bool // the cursor is on the colour row
+	// custom is the tag's own colour when it is not one of the palette's,
+	// as Kuma's web UI allows: it is kept until the user picks another, so
+	// renaming a tag does not repaint it.
+	custom string
 }
 
 func newTagForm(t kuma.TagDef) tagForm {
 	f := form{fields: []textinputModel{newField("name    ", "prod")}, shown: 1}
 	f.fields[0].SetValue(t.Name)
 	f, _ = f.focusOn(0)
-	tf := tagForm{form: f, id: t.ID}
+	tf := tagForm{form: f, id: t.ID, custom: t.Color}
 	for i, c := range kuma.TagColors {
 		if strings.EqualFold(c.Hex, t.Color) {
-			tf.color = i
+			tf.color, tf.custom = i, ""
 		}
 	}
 	return tf
@@ -134,8 +138,10 @@ func (t tagForm) Update(msg tea.Msg) (tagForm, formAction, tea.Cmd) {
 			switch {
 			case k.Type == tea.KeyRight || k.String() == "l":
 				t.color = (t.color + 1) % len(kuma.TagColors)
+				t.custom = ""
 			case k.Type == tea.KeyLeft || k.String() == "h":
 				t.color = (t.color + len(kuma.TagColors) - 1) % len(kuma.TagColors)
+				t.custom = ""
 			}
 			return t, formNone, nil
 		}
@@ -150,7 +156,11 @@ func (t tagForm) Values() (kuma.TagDef, error) {
 	if name == "" {
 		return kuma.TagDef{}, fmt.Errorf("the name is empty")
 	}
-	return kuma.TagDef{ID: t.id, Name: name, Color: kuma.TagColors[t.color].Hex}, nil
+	color := kuma.TagColors[t.color].Hex
+	if t.custom != "" {
+		color = t.custom
+	}
+	return kuma.TagDef{ID: t.id, Name: name, Color: color}, nil
 }
 
 func (t tagForm) View() string {
@@ -164,14 +174,19 @@ func (t tagForm) View() string {
 	b.WriteString(styleLabel.Render("colour  "))
 	for i, c := range kuma.TagColors {
 		swatch := lipgloss.NewStyle().Background(lipgloss.Color(c.Hex)).Render("  ")
-		if i == t.color {
+		if i == t.color && t.custom == "" {
 			swatch = "[" + swatch + "]"
 		} else {
 			swatch = " " + swatch + " "
 		}
 		b.WriteString(swatch)
 	}
-	b.WriteString("  " + styleValue.Render(kuma.TagColors[t.color].Name))
+	if t.custom != "" {
+		swatch := lipgloss.NewStyle().Background(lipgloss.Color(t.custom)).Render("  ")
+		b.WriteString("  [" + swatch + "] " + styleValue.Render("custom "+t.custom))
+	} else {
+		b.WriteString("  " + styleValue.Render(kuma.TagColors[t.color].Name))
+	}
 	if t.onColor {
 		b.WriteString(styleLabel.Render("  ←/→"))
 	}

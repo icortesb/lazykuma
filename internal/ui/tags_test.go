@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/icortesb/lazykuma/internal/kuma"
 )
 
 func TestTagsScreenListsAndCreates(t *testing.T) {
@@ -43,5 +45,28 @@ func TestTagsEditAndDelete(t *testing.T) {
 	h.press("y")
 	if !h.fakes["home"].Sent(`["deleteTag",4]`) {
 		t.Fatalf("delete not sent: %v", h.fakes["home"].Frames())
+	}
+}
+
+func TestEditingATagKeepsACustomColour(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("t") // fetches the tags: the custom one is put in after
+	h.m.tagDefs["home"] = []kuma.TagDef{{ID: 6, Name: "dns", Color: "#123456"}}
+	h.press("e")
+	if !strings.Contains(h.view(), "custom #123456") {
+		t.Errorf("the colour row does not show the tag's own colour:\n%s", h.view())
+	}
+	h.m.tform.fields[0].SetValue("resolvers")
+	h.press("enter")
+	if !h.fakes["home"].Sent(`["editTag",{"id":6,"name":"resolvers","color":"#123456"}]`) {
+		t.Fatalf("the colour changed: %v", h.fakes["home"].Frames())
+	}
+
+	// Moving the selector picks from the palette.
+	h.m.tagDefs["home"] = []kuma.TagDef{{ID: 6, Name: "dns", Color: "#123456"}}
+	h.press("e", "tab")
+	h.send(tea.KeyMsg{Type: tea.KeyRight})
+	if got, _ := h.m.tform.Values(); got.Color != kuma.TagColors[1].Hex {
+		t.Errorf("colour after moving = %q", got.Color)
 	}
 }
