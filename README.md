@@ -82,6 +82,10 @@ token is tied to the URL it was issued for, not the name.
 
 Logos and custom CSS are set in Kuma's web UI.
 
+Kuma gives a page's sections and incident only on the page itself, so `e`, `s` and `i` read them over plain HTTP from `<instance URL>/api/status-page/<slug>`. If a proxy asks for a login there, they say so and save nothing.
+
+### Keys on an instance
+
 | Key | |
 |---|---|
 | `↑/k` `↓/j` | move |
