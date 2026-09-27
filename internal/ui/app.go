@@ -61,6 +61,7 @@ const (
 	screenPageDelete   // a page's slug, before deleting it
 	screenPageSettings // a page's settings
 	screenPageSections // a page's sections and their monitors
+	screenPageIncident // a page's pinned incident
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -105,6 +106,7 @@ type Model struct {
 	pdel     slugConfirm
 	pset     pageSettings
 	secs     sectionsEditor
+	pinc     incidentForm
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -205,6 +207,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
+		if m.screen == screenPageIncident {
+			// The content wraps at the field's width, so it follows the
+			// terminal's; one not open is fitted when it opens.
+			m.pinc = m.pinc.withWidth(msg.Width)
+		}
 		return m, nil
 
 	case InstanceState:
@@ -256,7 +263,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// since, for something else.
 		switch m.screen {
 		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag,
-			screenPageNew, screenPageDelete, screenPageSettings:
+			screenPageNew, screenPageDelete, screenPageSettings, screenPageIncident:
 			m.screen = m.backTo
 		case screenPageSections:
 			// Its backTo is where its own forms return, the editor itself.
@@ -356,6 +363,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, flashFor("sections of "+msg.title+": "+kuma.Brief(msg.err), 8*time.Second)
 		}
 		m.secs, m.screen = sectionsEditor{slug: msg.slug, title: msg.title, sections: msg.sections}, screenPageSections
+		return m, nil
+
+	case incidentLoaded:
+		if m.screen != screenPages || m.current().name() != msg.instance {
+			// The user moved on while Kuma was answering; a form opened now
+			// would post to one instance's page what was meant for another.
+			return m, nil
+		}
+		if msg.err != nil {
+			return m, flashFor("incident on "+msg.title+": "+kuma.Brief(msg.err), 8*time.Second)
+		}
+		m.pinc = newIncidentForm(msg.slug, msg.title, msg.current).withWidth(m.width)
+		m.backTo, m.screen = screenPages, screenPageIncident
 		return m, nil
 
 	case sectionsAnswered:
@@ -463,6 +483,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updatePageSettings(msg)
 	case screenPageDelete:
 		return m.updateSlugConfirm(msg)
+	case screenPageIncident:
+		return m.updatePageIncident(msg)
 	}
 	return m, nil
 }
@@ -713,6 +735,8 @@ func (m Model) render() string {
 		return m.chrome(m.pdel.View(), "")
 	case screenPageSettings:
 		return m.chrome(m.pset.View(), "")
+	case screenPageIncident:
+		return m.chrome(m.pinc.View(), "")
 	case screenPageSections:
 		return m.chrome(m.secs.View(m.width, m.height-2), keyHintsSections)
 	}

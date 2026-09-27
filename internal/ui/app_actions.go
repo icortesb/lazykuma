@@ -575,6 +575,18 @@ func (m Model) updatePages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if ok {
 			return m, loadSections(in.inst, p.Slug, p.Title)
 		}
+	case pageIncident:
+		if ok {
+			return m, loadIncident(in.inst, p.Slug, p.Title)
+		}
+	case pageUnpin:
+		if ok {
+			m.ask = confirm{
+				question: fmt.Sprintf("Take down the incident on %q?", p.Title),
+				detail:   "the page stops showing it; Kuma keeps it in its history",
+			}
+			m.onYes, m.backTo, m.screen = unpinIncident(in.inst, p.Slug, p.Title), screenPages, screenConfirm
+		}
 	case pageNew:
 		m.pnew = newNewPageForm()
 		m.backTo, m.screen = screenPages, screenPageNew
@@ -632,6 +644,25 @@ func (m Model) updatePageSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pset.err = ""
 		return m, savePageSettings(m.current().inst, m.pset.page.Slug, config)
+	}
+	return m, cmd
+}
+
+func (m Model) updatePageIncident(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pinc, act, cmd = m.pinc.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		inc, err := m.pinc.Values()
+		if err != nil {
+			m.pinc.err = err.Error()
+			return m, nil
+		}
+		m.pinc.err = ""
+		return m, postIncident(m.current().inst, m.pinc.slug, m.pinc.page, inc)
 	}
 	return m, cmd
 }
