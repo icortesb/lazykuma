@@ -242,11 +242,14 @@ func (e sectionsEditor) View(width, height int) string {
 }
 
 // monitorOptions are the monitors and groups a section can take: every one
-// not in it already, named with the groups it is in.
-func monitorOptions(st state.Instance, sec kuma.PageSection) []option {
+// not on the page yet, in any of its sections, named with the groups it is
+// in. Kuma's own editor offers the same: a monitor shows once on a page.
+func monitorOptions(st state.Instance, sections []kuma.PageSection) []option {
 	in := map[int]bool{}
-	for _, m := range sec.Monitors {
-		in[m.ID] = true
+	for _, sec := range sections {
+		for _, m := range sec.Monitors {
+			in[m.ID] = true
+		}
 	}
 	var options []option
 	for _, m := range st.Monitors {

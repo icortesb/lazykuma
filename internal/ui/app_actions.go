@@ -735,9 +735,9 @@ func (m Model) updateSections(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, flashFor("add a section first (a)", 3*time.Second)
 		}
 		sec := e.sections[r.sec]
-		options := monitorOptions(m.current().st, sec)
+		options := monitorOptions(m.current().st, e.sections)
 		if len(options) == 0 {
-			return m, flashFor("every monitor is in "+sec.Name+" already", 3*time.Second)
+			return m, flashFor("every monitor is on the page already", 3*time.Second)
 		}
 		m.pick = newPicker(fmt.Sprintf("Add to %q", sec.Name), "a monitor, or a group to show as one", options)
 		m.picking, m.backTo, m.screen = "pagemon", screenPageSections, screenPick

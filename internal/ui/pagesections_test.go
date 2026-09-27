@@ -342,3 +342,22 @@ func TestPageSectionsSavedUnderAFormOpenedFromThem(t *testing.T) {
 		t.Errorf("esc on a saved editor asked or stayed: %v", h.m.screen)
 	}
 }
+
+func TestPageSectionsOfferOnlyMonitorsNotOnThePage(t *testing.T) {
+	h := onSections(t)
+	h.press("a")
+	h.typeText("Internal")
+	h.press("enter", "m")
+	if h.m.screen != screenPick || strings.Contains(h.view(), "nextcloud") || !strings.Contains(h.view(), "vaultwarden") {
+		t.Fatalf("a new section is offered a monitor another section has, or not the rest:\n%s", h.view())
+	}
+	h.press("enter", "a")
+	h.typeText("Edge")
+	h.press("enter", "m")
+	if h.m.screen != screenPageSections || !strings.Contains(h.view(), "every monitor is on the page already") {
+		t.Errorf("with every monitor on the page: %v\n%s", h.m.screen, h.view())
+	}
+	if !reflect.DeepEqual(names(h.m.secs), []string{"Services: nextcloud", "Internal: vaultwarden", "Edge:"}) {
+		t.Errorf("sections = %v", names(h.m.secs))
+	}
+}
