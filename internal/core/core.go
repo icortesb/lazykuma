@@ -443,6 +443,88 @@ func (i *Instance) ClearHeartbeats(ctx context.Context, monitorID int) error {
 	return s.ClearHeartbeats(ctx, monitorID)
 }
 
+// AddStatusPage creates a page and returns its slug as Kuma stored it.
+func (i *Instance) AddStatusPage(ctx context.Context, title, slug string) (string, error) {
+	s, err := i.session()
+	if err != nil {
+		return "", err
+	}
+	got, err := s.AddStatusPage(ctx, title, slug)
+	if err != nil {
+		return "", err
+	}
+	i.refreshPage(ctx, s, got)
+	return got, nil
+}
+
+// refreshPage reads a page after a write and folds it into the state:
+// Kuma sends the page list only at login. A failed read leaves the state
+// as it was; the write itself succeeded.
+func (i *Instance) refreshPage(ctx context.Context, s *kuma.Session, slug string) {
+	if p, err := s.GetStatusPage(ctx, slug); err == nil {
+		i.apply(kuma.StatusPageSaved{Page: p})
+	}
+}
+
+// GetStatusPage is a page's settings, all of them.
+func (i *Instance) GetStatusPage(ctx context.Context, slug string) (kuma.StatusPage, error) {
+	s, err := i.session()
+	if err != nil {
+		return kuma.StatusPage{}, err
+	}
+	return s.GetStatusPage(ctx, slug)
+}
+
+// PublicPage is a page's sections and incidents, read the way a visitor
+// would, from the instance itself rather than through a session.
+func (i *Instance) PublicPage(ctx context.Context, slug string) (kuma.PublicPage, error) {
+	return kuma.FetchPublicPage(ctx, i.cfg.URL, slug)
+}
+
+// SaveStatusPage replaces a page's settings and sections with these.
+func (i *Instance) SaveStatusPage(ctx context.Context, slug string, config map[string]any, sections []kuma.PageSection) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	if err := s.SaveStatusPage(ctx, slug, config, sections); err != nil {
+		return err
+	}
+	i.refreshPage(ctx, s, slug)
+	return nil
+}
+
+// DeleteStatusPage removes a page, its sections and its incidents.
+func (i *Instance) DeleteStatusPage(ctx context.Context, slug string) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	if err := s.DeleteStatusPage(ctx, slug); err != nil {
+		return err
+	}
+	i.apply(kuma.StatusPageDeleted{Slug: slug})
+	return nil
+}
+
+// PostIncident pins an incident to a page, or edits the one with inc.ID.
+func (i *Instance) PostIncident(ctx context.Context, slug string, inc kuma.PageIncident) (kuma.PageIncident, error) {
+	s, err := i.session()
+	if err != nil {
+		return kuma.PageIncident{}, err
+	}
+	return s.PostIncident(ctx, slug, inc)
+}
+
+// UnpinIncident takes a page's incident down.
+func (i *Instance) UnpinIncident(ctx context.Context, slug string) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.UnpinIncident(ctx, slug)
+}
+
 // SaveNotification creates a channel, or edits the one with that id.
 func (i *Instance) SaveNotification(ctx context.Context, cfg map[string]any, id int) (int, error) {
 	s, err := i.session()

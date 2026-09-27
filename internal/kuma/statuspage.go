@@ -31,6 +31,17 @@ type StatusPageList struct{ Pages []StatusPage }
 
 func (StatusPageList) event() {}
 
+// StatusPageSaved and StatusPageDeleted are not sent by Kuma: after a write
+// the client applies them itself, because Kuma sends the page list only at
+// login.
+type (
+	StatusPageSaved   struct{ Page StatusPage }
+	StatusPageDeleted struct{ Slug string }
+)
+
+func (StatusPageSaved) event()   {}
+func (StatusPageDeleted) event() {}
+
 // PageMonitor is a monitor shown on a status page. SendURL and URL are the
 // page's own link for it, kept as they are on a save.
 type PageMonitor struct {

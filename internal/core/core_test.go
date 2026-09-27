@@ -30,6 +30,12 @@ func kumaFake(t *testing.T) *kumatest.Server {
 			return map[string]any{"ok": true, "msg": "successAdded", "maintenanceID": 4}
 		case "addMonitorMaintenance", "deleteMaintenance", "deleteMonitor":
 			return map[string]any{"ok": true, "msg": "successDeleted"}
+		case "addStatusPage":
+			return map[string]any{"ok": true, "msg": "successAdded", "slug": "shop-status"}
+		case "getStatusPage":
+			return json.RawMessage(`{"ok":true,"config":{"id":1,"slug":"shop-status","title":"Shop status","published":true}}`)
+		case "deleteStatusPage":
+			return map[string]any{"ok": true}
 		}
 		return login(event, args)
 	})
@@ -310,6 +316,38 @@ func TestSilenceWindowIsSentInUTC(t *testing.T) {
 	if f.Sent(`"Local"`) {
 		t.Fatal(`sent Go's "Local" zone name, which Kuma rejects`)
 	}
+}
+
+// TestStatusPageWritesRefreshState checks that a write to a status page
+// keeps the instance's state current itself, since Kuma sends the page list
+// only once, at login.
+func TestStatusPageWritesRefreshState(t *testing.T) {
+	f := kumaFake(t)
+	c, _ := open(t, func(string) string { return "jwt" }, config.Instance{Name: "home", URL: f.URL()})
+	runCore(t, c)
+	waitFor(t, c, "home", "connected", func(s state.Instance) bool { return s.Conn == state.ConnOK })
+	in, _ := c.Instance("home")
+	ctx := context.Background()
+
+	slug, err := in.AddStatusPage(ctx, "Shop status", "shop-status")
+	if err != nil || slug != "shop-status" {
+		t.Fatalf("AddStatusPage = %q, %v", slug, err)
+	}
+	s := waitFor(t, c, "home", "the page added", func(s state.Instance) bool {
+		_, ok := s.StatusPage("shop-status")
+		return ok
+	})
+	if p, _ := s.StatusPage("shop-status"); p.Title != "Shop status" {
+		t.Fatalf("page = %+v", p)
+	}
+
+	if err := in.DeleteStatusPage(ctx, "shop-status"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, c, "home", "the page gone", func(s state.Instance) bool {
+		_, ok := s.StatusPage("shop-status")
+		return !ok
+	})
 }
 
 func TestAddBeforeRunStartsOnce(t *testing.T) {

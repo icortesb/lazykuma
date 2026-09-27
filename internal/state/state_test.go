@@ -304,3 +304,29 @@ func TestListedOnlyOnceTheMonitorListArrives(t *testing.T) {
 		t.Fatal("still listed after a reconnect, before the new list")
 	}
 }
+
+func TestStatusPages(t *testing.T) {
+	in := Apply(Instance{}, kuma.Connected{}, t0)
+	in = Apply(in, kuma.StatusPageList{Pages: []kuma.StatusPage{
+		{ID: 1, Slug: "shop", Title: "Shop"}, {ID: 2, Slug: "docs", Title: "docs"},
+	}}, t0)
+	if len(in.StatusPages) != 2 || in.StatusPages[0].Slug != "docs" {
+		t.Fatalf("pages = %+v", in.StatusPages)
+	}
+	// A saved page replaces the one with its id, even under a new slug.
+	in = Apply(in, kuma.StatusPageSaved{Page: kuma.StatusPage{ID: 1, Slug: "store", Title: "Store"}}, t0)
+	if _, ok := in.StatusPage("shop"); ok {
+		t.Error("the old slug is still there")
+	}
+	if p, ok := in.StatusPage("store"); !ok || p.Title != "Store" || len(in.StatusPages) != 2 {
+		t.Fatalf("after save: %+v", in.StatusPages)
+	}
+	in = Apply(in, kuma.StatusPageSaved{Page: kuma.StatusPage{ID: 3, Slug: "api", Title: "API"}}, t0)
+	if in.StatusPages[0].Slug != "api" || len(in.StatusPages) != 3 {
+		t.Fatalf("after add: %+v", in.StatusPages)
+	}
+	in = Apply(in, kuma.StatusPageDeleted{Slug: "docs"}, t0)
+	if _, ok := in.StatusPage("docs"); ok || len(in.StatusPages) != 2 {
+		t.Fatalf("after delete: %+v", in.StatusPages)
+	}
+}

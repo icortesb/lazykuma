@@ -138,6 +138,10 @@ type Instance struct {
 	Types []string
 	// Incidents are the state changes it reported, oldest first.
 	Incidents []Incident
+	// StatusPages are its public status pages, sorted by title (case
+	// insensitive) then slug. Kuma sends the list once at login; a write
+	// keeps it current with a synthetic event of its own.
+	StatusPages []kuma.StatusPage
 }
 
 // RecentIncidents is the newest n state changes, newest first.
@@ -245,8 +249,41 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 		in = update(in, ev.MonitorID, func(m *Monitor) {
 			m.CertDays, m.HasCert = ev.DaysRemaining, ev.Valid
 		})
+	case kuma.StatusPageList:
+		in.StatusPages = sortPages(slices.Clone(ev.Pages))
+	case kuma.StatusPageSaved:
+		pages := make([]kuma.StatusPage, 0, len(in.StatusPages)+1)
+		for _, p := range in.StatusPages {
+			if p.ID != ev.Page.ID && p.Slug != ev.Page.Slug {
+				pages = append(pages, p)
+			}
+		}
+		in.StatusPages = sortPages(append(pages, ev.Page))
+	case kuma.StatusPageDeleted:
+		in.StatusPages = slices.DeleteFunc(slices.Clone(in.StatusPages), func(p kuma.StatusPage) bool { return p.Slug == ev.Slug })
 	}
 	return in
+}
+
+// StatusPage is the page with this slug.
+func (in Instance) StatusPage(slug string) (kuma.StatusPage, bool) {
+	for _, p := range in.StatusPages {
+		if p.Slug == slug {
+			return p, true
+		}
+	}
+	return kuma.StatusPage{}, false
+}
+
+func sortPages(pages []kuma.StatusPage) []kuma.StatusPage {
+	sort.SliceStable(pages, func(i, j int) bool {
+		ti, tj := strings.ToLower(pages[i].Title), strings.ToLower(pages[j].Title)
+		if ti != tj {
+			return ti < tj
+		}
+		return pages[i].Slug < pages[j].Slug
+	})
+	return pages
 }
 
 // addIncidents records the important beats among these: Kuma marks a beat
