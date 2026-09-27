@@ -499,7 +499,7 @@ func TestDetailFormFinishedAfterTheMonitorWentLeaves(t *testing.T) {
 	if h.m.screen != screenSilence {
 		t.Fatalf("the form was closed under the user: %v", h.m.screen)
 	}
-	h.send(actionDone{name: "home", action: "silenced", mon: "web"})
+	h.send(actionDone{name: "home", action: "silenced", mon: "web", from: screenSilence})
 	if h.m.screen != screenInstance {
 		t.Fatalf("returned to the detail of a deleted monitor: %v", h.m.screen)
 	}

@@ -18,6 +18,20 @@ import (
 // login on a large idle instance can take half a minute.
 const actionTimeout = 45 * time.Second
 
+// sentFrom stamps the form a write is sent from on the write's answer, so
+// that the answer closes that form and no other: a form opened while the
+// write was on its way stays open.
+func sentFrom(from screen, cmd tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		msg := cmd()
+		if done, ok := msg.(actionDone); ok {
+			done.from = from
+			return done
+		}
+		return msg
+	}
+}
+
 // current is the instance the screens are working on.
 func (m Model) current() instance { return m.insts[m.cur] }
 
@@ -126,6 +140,14 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.screen = m.backTo
+		case "pagemon":
+			id, _ := strconv.Atoi(value)
+			m.screen = m.backTo
+			// A monitor deleted while the picker was open would be saved
+			// onto the page as an id Kuma no longer has.
+			if mon, ok := m.current().st.Monitors[id]; ok {
+				m.secs = m.secs.addMonitor(kuma.PageMonitor{ID: id, Name: mon.Name})
+			}
 		}
 	}
 	return m, nil
@@ -144,10 +166,18 @@ func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.nform.err = err.Error()
 			return m, nil
 		}
-		if m.nform.id == 0 {
-			return m, addGroup(m.current().inst, name)
+		switch m.nform.section {
+		case "add":
+			m.secs, m.screen = m.secs.addSection(name), m.backTo
+			return m, nil
+		case "rename":
+			m.secs, m.screen = m.secs.renameSection(name), m.backTo
+			return m, nil
 		}
-		return m, renameGroup(m.current().inst, m.nform.id, name)
+		if m.nform.id == 0 {
+			return m, sentFrom(screenName, addGroup(m.current().inst, name))
+		}
+		return m, sentFrom(screenName, renameGroup(m.current().inst, m.nform.id, name))
 	}
 	return m, cmd
 }
@@ -193,7 +223,7 @@ func (m Model) updateTagForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tform.err = err.Error()
 			return m, nil
 		}
-		return m, saveTag(m.current().inst, t)
+		return m, sentFrom(screenTag, saveTag(m.current().inst, t))
 	}
 	return m, cmd
 }
@@ -212,7 +242,7 @@ func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		add, remove := m.mform.TagChanges()
-		return m, saveMonitor(m.current().inst, mon, m.mform.id, add, remove)
+		return m, sentFrom(screenMonitor, saveMonitor(m.current().inst, mon, m.mform.id, add, remove))
 	}
 	return m, cmd
 }
@@ -231,13 +261,13 @@ func (m Model) updateRaw(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.raw.what == "channel" {
-			return m, saveChannel(m.current().inst, values, m.raw.id)
+			return m, sentFrom(screenRaw, saveChannel(m.current().inst, values, m.raw.id))
 		}
 		var addTags []kuma.Tag
 		if m.raw.id == 0 {
 			addTags = m.raw.cloneTags
 		}
-		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil)
+		return m, sentFrom(screenRaw, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil))
 	}
 	return m, cmd
 }
@@ -309,7 +339,7 @@ func (m Model) updateChannelForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cform.err = err.Error()
 			return m, nil
 		}
-		return m, saveChannel(m.current().inst, cfg, m.cform.id)
+		return m, sentFrom(screenChannel, saveChannel(m.current().inst, cfg, m.cform.id))
 	}
 	return m, cmd
 }
@@ -329,7 +359,7 @@ func (m Model) updateSilence(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The monitor was chosen when the form opened: the list can reorder
 		// underneath while the times are typed.
-		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end)
+		return m, sentFrom(screenSilence, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end))
 	}
 	return m, cmd
 }
@@ -538,6 +568,195 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			detail:   "Kuma deletes all of its beats, state changes and uptime statistics; the chart starts again from now",
 		}
 		m.onYes, m.backTo, m.screen = clearHistory(in.inst, mon), screenDetail, screenConfirm
+	}
+	return m, nil
+}
+
+func (m Model) updatePages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	pages := in.st.StatusPages
+	var act pageAction
+	m.pages, act = m.pages.Update(msg, pages)
+	p, ok := m.pages.selected(pages)
+	switch act {
+	case pageBack:
+		m.screen = screenInstance
+	case pageEdit:
+		if ok {
+			return m, loadPage(in.inst, p.Slug)
+		}
+	case pageSections:
+		if ok {
+			return m, loadSections(in.inst, p.Slug, p.Title)
+		}
+	case pageIncident:
+		if ok {
+			return m, loadIncident(in.inst, p.Slug, p.Title)
+		}
+	case pageUnpin:
+		if ok {
+			m.ask = confirm{
+				question: fmt.Sprintf("Take down the incident on %q?", p.Title),
+				detail:   "the page stops showing it; Kuma keeps it in its history",
+			}
+			m.onYes, m.backTo, m.screen = unpinIncident(in.inst, p.Slug, p.Title), screenPages, screenConfirm
+		}
+	case pageNew:
+		m.pnew = newNewPageForm()
+		m.backTo, m.screen = screenPages, screenPageNew
+	case pageOpen:
+		if !ok {
+			break
+		}
+		// openURL starts the browser and does not wait for it, so it can
+		// run here, in the update.
+		u := kuma.PageURL(in.url(), p.Slug)
+		if err := openURL(u); err != nil {
+			return m, flashFor(fmt.Sprintf("open %s yourself: %v", u, err), 8*time.Second)
+		}
+		return m, flashFor("opened "+u, 3*time.Second)
+	case pageDelete:
+		if ok {
+			m.pdel = newSlugConfirm(p.Title, p.Slug)
+			m.backTo, m.screen = screenPages, screenPageDelete
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updatePageForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pnew, act, cmd = m.pnew.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		title, slug, err := m.pnew.Values()
+		if err != nil {
+			m.pnew.err = err.Error()
+			return m, nil
+		}
+		m.pnew.err = ""
+		return m, sentFrom(screenPageNew, addPage(m.current().inst, title, slug))
+	}
+	return m, cmd
+}
+
+func (m Model) updatePageSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pset, act, cmd = m.pset.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		changes, err := m.pset.Changes()
+		if err != nil {
+			m.pset.err = err.Error()
+			return m, nil
+		}
+		m.pset.err = ""
+		return m, sentFrom(screenPageSettings, savePageSettings(m.current().inst, m.pset.page.Slug, m.pset.page.Title, changes))
+	}
+	return m, cmd
+}
+
+func (m Model) updatePageIncident(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pinc, act, cmd = m.pinc.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		inc, err := m.pinc.Values()
+		if err != nil {
+			m.pinc.err = err.Error()
+			return m, nil
+		}
+		m.pinc.err = ""
+		return m, sentFrom(screenPageIncident, postIncident(m.current().inst, m.pinc.slug, m.pinc.page, inc))
+	}
+	return m, cmd
+}
+
+func (m Model) updateSlugConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pdel, act, cmd = m.pdel.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		if !m.pdel.Confirmed() {
+			m.pdel.err = "type " + m.pdel.slug + " to delete it"
+			return m, nil
+		}
+		m.pdel.err = ""
+		in := m.current()
+		p, ok := in.st.StatusPage(m.pdel.slug)
+		if !ok {
+			p = kuma.StatusPage{Slug: m.pdel.slug, Title: m.pdel.title}
+		}
+		return m, sentFrom(screenPageDelete, deletePage(in.inst, p))
+	}
+	return m, cmd
+}
+
+func (m Model) updateSections(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	e := m.secs
+	r, hasRow := e.current()
+	switch {
+	case key.Matches(msg, keys.Up):
+		m.secs = e.up()
+	case key.Matches(msg, keys.Down):
+		m.secs = e.down()
+	case key.Matches(msg, keys.Back):
+		if !e.dirty {
+			m.screen = screenPages
+			return m, nil
+		}
+		m.ask = confirm{question: "Discard the changes to the sections?", detail: "none of them has been saved to Kuma"}
+		m.onYes = func() tea.Msg { return sectionsAnswered{discard: true} }
+		m.backTo, m.screen = screenPageSections, screenConfirm
+	case msg.Type == tea.KeyCtrlS:
+		return m, sentFrom(screenPageSections, saveSections(m.current().inst, e.slug, e.title, e.sections))
+	case msg.String() == "a":
+		m.nform = newNameForm("New section", "a heading on the page, with monitors under it", "", 0)
+		m.nform.section = "add"
+		m.backTo, m.screen = screenPageSections, screenName
+	case msg.String() == "r" && hasRow && r.mon < 0:
+		m.nform = newNameForm("Rename section", "", e.sections[r.sec].Name, 0)
+		m.nform.section = "rename"
+		m.backTo, m.screen = screenPageSections, screenName
+	case msg.String() == "m":
+		if !hasRow {
+			return m, flashFor("add a section first (a)", 3*time.Second)
+		}
+		sec := e.sections[r.sec]
+		options := monitorOptions(m.current().st, e.sections)
+		if len(options) == 0 {
+			return m, flashFor("every monitor is on the page already", 3*time.Second)
+		}
+		m.pick = newPicker(fmt.Sprintf("Add to %q", sec.Name), "a monitor, or a group to show as one", options)
+		m.picking, m.backTo, m.screen = "pagemon", screenPageSections, screenPick
+	case msg.String() == "d" && hasRow:
+		sec := e.sections[r.sec]
+		if r.mon >= 0 || len(sec.Monitors) == 0 {
+			m.secs = e.removeRow()
+			return m, nil
+		}
+		m.ask = confirm{
+			question: fmt.Sprintf("Remove the section %q and its %s from the page?", sec.Name, monitors(len(sec.Monitors))),
+			detail:   "the monitors stay in Kuma; nothing changes there until ctrl+s saves",
+		}
+		m.onYes = func() tea.Msg { return sectionsAnswered{} }
+		m.backTo, m.screen = screenPageSections, screenConfirm
+	case msg.String() == "K":
+		m.secs = e.moveUp()
+	case msg.String() == "J":
+		m.secs = e.moveDown()
 	}
 	return m, nil
 }

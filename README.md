@@ -70,6 +70,22 @@ Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` dir
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
 token is tied to the URL it was issued for, not the name.
 
+### Status pages
+
+`S` lists the instance's public status pages with their addresses. From there:
+- `n` creates one; the slug follows the title until you type your own
+- `e` edits its title, description, footer, theme, refresh interval, domains and what it shows; everything else the page has (logo, custom CSS, analytics) stays as it is
+- `s` arranges its sections and the monitors in each
+- `i` posts or edits its incident, and `u` takes it down
+- `o` opens it in your browser
+- `d` deletes it, after you type its slug
+
+Logos and custom CSS are set in Kuma's web UI.
+
+Kuma gives a page's sections and incident only on the page itself, so `e`, `s` and `i` read them over plain HTTP from `<instance URL>/api/status-page/<slug>`. If a proxy asks for a login there, they say so and save nothing.
+
+### Keys on an instance
+
 | Key | |
 |---|---|
 | `↑/k` `↓/j` | move |
@@ -88,6 +104,7 @@ token is tied to the URL it was issued for, not the name.
 | `t` | the instance's tags |
 | `c` | the instance's notification channels |
 | `i` | the incident timeline |
+| `S` | the instance's status pages |
 | `/` | search names, targets and tags |
 | `f` | show only down, up, paused or maintenance monitors |
 | `s` | sort by status, name, ping or uptime |

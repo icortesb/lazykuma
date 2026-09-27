@@ -32,6 +32,18 @@ type Server struct {
 	conns  []*websocket.Conn
 	calls  []string // event names received, in order
 	frames []string // every frame received, in order
+	routes map[string]http.HandlerFunc
+}
+
+// Handle serves h for requests to path, next to the socket: Kuma answers
+// some things, like a status page's sections, only over plain HTTP.
+func (f *Server) Handle(path string, h http.HandlerFunc) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.routes == nil {
+		f.routes = map[string]http.HandlerFunc{}
+	}
+	f.routes[path] = h
 }
 
 func New(t *testing.T, handle func(event string, args []json.RawMessage) any) *Server {
@@ -50,6 +62,13 @@ func NewSlow(t *testing.T, slowStart time.Duration, handle func(event string, ar
 func (f *Server) URL() string { return f.srv.URL }
 
 func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	h := f.routes[r.URL.Path]
+	f.mu.Unlock()
+	if h != nil {
+		h(w, r)
+		return
+	}
 	if r.URL.Path != "/socket.io/" || r.URL.Query().Get("EIO") != "4" {
 		http.NotFound(w, r)
 		return

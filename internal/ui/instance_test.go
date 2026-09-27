@@ -44,12 +44,20 @@ func keyMsg(k string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyEsc}
 	case "tab":
 		return tea.KeyMsg{Type: tea.KeyTab}
+	case "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
 	case "down":
 		return tea.KeyMsg{Type: tea.KeyDown}
 	case "up":
 		return tea.KeyMsg{Type: tea.KeyUp}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
 	case "backspace":
 		return tea.KeyMsg{Type: tea.KeyBackspace}
+	case "ctrl+s":
+		return tea.KeyMsg{Type: tea.KeyCtrlS}
 	}
 	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
 }

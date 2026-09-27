@@ -86,6 +86,7 @@ func newHarness(t *testing.T, loggedIn []string, names ...string) *harness {
 // kumaWrites answers login and the write calls the UI tests make.
 func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 	login := kumatest.Login(false)
+	restyled := 0
 	return func(event string, args []json.RawMessage) any {
 		switch event {
 		case "add":
@@ -167,6 +168,36 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			return map[string]any{"ok": true, "data": page}
 		case "clearEvents", "clearHeartbeats":
 			return map[string]any{"ok": true}
+		case "addStatusPage":
+			var slug string
+			json.Unmarshal(args[1], &slug)
+			return map[string]any{"ok": true, "slug": strings.ToLower(slug)}
+		case "getStatusPage":
+			var slug string
+			json.Unmarshal(args[0], &slug)
+			config := map[string]any{
+				"id": 7, "slug": slug, "title": "Shop status", "icon": "/icon.svg", "published": true,
+				"domainNameList": []string{}, "customCSS": "body{}",
+			}
+			if slug == "restyled" {
+				// A page the web UI changes after its first read.
+				restyled++
+				config["footerText"], config["showTags"] = nil, false
+				if restyled > 1 {
+					config["customCSS"], config["footerText"], config["showTags"] = "body{color:red}", "From the web", true
+				}
+			}
+			return map[string]any{"ok": true, "config": config}
+		case "saveStatusPage", "deleteStatusPage", "unpinIncident":
+			return map[string]any{"ok": true}
+		case "postIncident":
+			var inc map[string]any
+			json.Unmarshal(args[1], &inc)
+			if inc["title"] == "Refused" {
+				return map[string]any{"ok": false, "msg": "Title is too long"}
+			}
+			inc["id"], inc["pin"] = 3, true
+			return map[string]any{"ok": true, "incident": inc}
 		}
 		return login(event, args)
 	}
@@ -226,6 +257,18 @@ func (h *harness) run(cmd tea.Cmd) {
 		}
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// hold answers a key as the program would, but keeps back the command it
+// returns, for the test to run when it chooses: a write still on its way.
+func (h *harness) hold(k string) tea.Cmd {
+	h.t.Helper()
+	next, cmd := h.m.Update(keyMsg(k))
+	h.m = next.(Model)
+	if cmd == nil {
+		h.t.Fatalf("%s sent nothing", k)
+	}
+	return cmd
 }
 
 func (h *harness) press(keys ...string) {
