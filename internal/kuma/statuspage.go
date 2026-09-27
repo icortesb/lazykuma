@@ -182,7 +182,8 @@ func (s *Session) GetStatusPage(ctx context.Context, slug string) (StatusPage, e
 }
 
 // SaveStatusPage replaces a page's settings and sections with these. The
-// logo is sent back as the page has it, which keeps it.
+// logo is sent back as the page has it, which keeps it. Kuma flushes its
+// public-page cache (see FetchPublicPage) as part of this call.
 func (s *Session) SaveStatusPage(ctx context.Context, slug string, config map[string]any, sections []PageSection) error {
 	icon, _ := config["icon"].(string)
 	if icon == "" {
@@ -214,7 +215,8 @@ func (s *Session) SaveStatusPage(ctx context.Context, slug string, config map[st
 	return r.err()
 }
 
-// DeleteStatusPage removes a page, its sections and its incidents.
+// DeleteStatusPage removes a page, its sections and its incidents. Kuma
+// flushes its public-page cache (see FetchPublicPage) as part of this call.
 func (s *Session) DeleteStatusPage(ctx context.Context, slug string) error {
 	r, err := s.call(ctx, "deleteStatusPage", slug)
 	if err != nil {
@@ -224,6 +226,9 @@ func (s *Session) DeleteStatusPage(ctx context.Context, slug string) error {
 }
 
 // PostIncident pins an incident to a page, or edits the one with inc.ID.
+// Unlike SaveStatusPage and DeleteStatusPage, this does not flush Kuma's
+// public-page cache: FetchPublicPage can still return the page as it was up
+// to 5 minutes ago.
 func (s *Session) PostIncident(ctx context.Context, slug string, inc PageIncident) (PageIncident, error) {
 	body := map[string]any{"title": inc.Title, "content": inc.Content, "style": inc.Style}
 	if inc.ID != 0 {
@@ -249,7 +254,10 @@ func (s *Session) PostIncident(ctx context.Context, slug string, inc PageInciden
 	return decodeIncident(r.Incident)
 }
 
-// UnpinIncident takes a page's incident down.
+// UnpinIncident takes a page's incident down: Kuma drops it from
+// FetchPublicPage's Incidents entirely rather than keeping it there
+// unpinned. Like PostIncident, this does not flush Kuma's public-page
+// cache.
 func (s *Session) UnpinIncident(ctx context.Context, slug string) error {
 	r, err := s.call(ctx, "unpinIncident", slug)
 	if err != nil {
@@ -277,7 +285,9 @@ func decodeIncident(raw json.RawMessage) (PageIncident, error) {
 
 // FetchPublicPage reads a status page the way its visitors do, over plain
 // HTTP from the instance: it is the only place Kuma gives a page's
-// sections.
+// sections. Kuma caches this endpoint server-side for 5 minutes; only
+// SaveStatusPage and DeleteStatusPage flush that cache, so a page fetched
+// here can lag an incident PostIncident or UnpinIncident just made.
 func FetchPublicPage(ctx context.Context, base, slug string) (PublicPage, error) {
 	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/api/status-page/" + url.PathEscape(slug)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
