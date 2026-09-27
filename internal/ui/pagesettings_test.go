@@ -1,11 +1,14 @@
 package ui
 
 import (
+	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/icortesb/lazykuma/internal/kuma"
 )
@@ -119,5 +122,69 @@ func TestPageSettingsToggles(t *testing.T) {
 	f.fields[0].SetValue(" ")
 	if _, err := f.Config(); err == nil {
 		t.Error("an empty title was accepted")
+	}
+}
+
+func TestPageSettingsSendUntouchedFieldsAsLoaded(t *testing.T) {
+	var domains []any
+	for i := 0; len(fieldText(domains)) < 600; i++ {
+		domains = append(domains, fmt.Sprintf("status%d.example.com", i))
+	}
+	p := kuma.StatusPage{Slug: "shop-status", Title: "Shop status", Config: map[string]any{
+		"title": "Shop status", "description": nil, "footerText": "line one\nline two",
+		"autoRefreshInterval": float64(300), "domainNameList": domains, "theme": "auto", "showTags": false,
+	}}
+	f := newPageSettings(p)
+	if !strings.Contains(ansi.Strip(f.View()), "multi-line in Kuma") {
+		t.Errorf("the multi-line footer is not pointed out:\n%s", f.View())
+	}
+	f.toggles[0].on = true
+	cfg, err := f.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := cfg["description"]; !ok || v != nil {
+		t.Errorf("description = %#v, want nil kept", v)
+	}
+	if cfg["footerText"] != "line one\nline two" {
+		t.Errorf("footer = %q", cfg["footerText"])
+	}
+	if !reflect.DeepEqual(cfg["domainNameList"], domains) {
+		t.Errorf("domains cut or changed: %v", cfg["domainNameList"])
+	}
+	if cfg["autoRefreshInterval"] != float64(300) || cfg["showTags"] != true {
+		t.Errorf("config = %v", cfg)
+	}
+
+	f.fields[1].SetValue("All systems")
+	cfg, _ = f.Config()
+	if cfg["description"] != "All systems" || cfg["footerText"] != "line one\nline two" {
+		t.Errorf("an edited description is not sent alone: %v", cfg)
+	}
+}
+
+func TestPageSettingsDownTypedAsTextStaysInTheField(t *testing.T) {
+	f := newPageSettings(kuma.StatusPage{Slug: "shop-status", Title: "Shop status"})
+	for i := 0; i < 5; i++ {
+		f, _, _ = f.Update(keyMsg("tab"))
+	}
+	f.fields[5].SetValue("")
+	f, _, _ = f.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("down")})
+	if f.inToggles() || f.fields[5].Value() != "down" {
+		t.Errorf("typed %q, in toggles %v", f.fields[5].Value(), f.inToggles())
+	}
+}
+
+func TestPageSettingsRefreshRange(t *testing.T) {
+	f := newPageSettings(kuma.StatusPage{Slug: "shop-status", Title: "Shop status"})
+	for _, v := range []string{"-1", "86401", "999999999", "soon"} {
+		f.fields[3].SetValue(v)
+		if _, err := f.Config(); err == nil || !strings.Contains(err.Error(), "0 to 86400") {
+			t.Errorf("refresh %q: %v", v, err)
+		}
+	}
+	f.fields[3].SetValue("86400")
+	if cfg, err := f.Config(); err != nil || cfg["autoRefreshInterval"] != 86400 {
+		t.Errorf("a day: %v %v", cfg, err)
 	}
 }

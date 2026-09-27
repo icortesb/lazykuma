@@ -31,7 +31,20 @@ type pageSettings struct {
 	page    kuma.StatusPage
 	toggles []pageToggle
 	toggle  int // the toggle the cursor is on; -1 while it is in the fields
+	// loaded is each field's text as the form filled it. A field still
+	// showing it sends the page's own value back: a one-line field cannot
+	// hold Kuma's multi-line markdown, and a null must stay a null.
+	loaded []string
+	// multiline marks the fields whose value in Kuma has more than one
+	// line, which the form shows joined.
+	multiline []bool
 }
+
+// The config keys the text fields fill, in their order.
+var pageFieldKeys = []string{"title", "description", "footerText", "autoRefreshInterval", "domainNameList", "theme"}
+
+// maxRefresh is the longest auto refresh the form takes: a day.
+const maxRefresh = 86400
 
 func (s pageSettings) inToggles() bool { return s.toggle >= 0 }
 
@@ -44,6 +57,11 @@ func newPageSettings(p kuma.StatusPage) pageSettings {
 		newField("domains      ", "status.example.com"),
 		newField("theme        ", "auto, light or dark"),
 	}, shown: 6}
+	for i := range f.fields {
+		// No limit: a long description or domain list loaded cut short
+		// would be saved cut short.
+		f.fields[i].CharLimit = 0
+	}
 	c := p.Config
 	f.fields[0].SetValue(fieldText(c["title"]))
 	if f.fields[0].Value() == "" {
@@ -64,8 +82,15 @@ func newPageSettings(p kuma.StatusPage) pageSettings {
 	f.fields[4].SetValue(fieldText(c["domainNameList"]))
 	f.fields[5].SetValue(theme)
 	f, _ = f.focusOn(0)
+	loaded := make([]string, len(f.fields))
+	multiline := make([]bool, len(f.fields))
+	for i := range f.fields {
+		loaded[i] = f.fields[i].Value()
+		v, _ := c[pageFieldKeys[i]].(string)
+		multiline[i] = strings.Contains(v, "\n")
+	}
 
-	s := pageSettings{form: f, page: p, toggle: -1, toggles: []pageToggle{
+	s := pageSettings{form: f, page: p, toggle: -1, loaded: loaded, multiline: multiline, toggles: []pageToggle{
 		{key: "showTags", name: "show tags"},
 		{key: "showCertificateExpiry", name: "certificate expiry"},
 		{key: "showOnlyLastHeartbeat", name: "only last beat"},
@@ -101,7 +126,7 @@ func (s pageSettings) Update(msg tea.Msg) (pageSettings, formAction, tea.Cmd) {
 		}
 		return s, formNone, nil
 	}
-	if isKey && s.focus == s.shown-1 && key.Matches(k, keys.Next) {
+	if isKey && k.Type != tea.KeyRunes && s.focus == s.shown-1 && key.Matches(k, keys.Next) {
 		s.toggle = 0
 		for i := range s.fields {
 			s.fields[i].Blur()
@@ -132,29 +157,40 @@ func (s pageSettings) Config() (map[string]any, error) {
 	for k, v := range s.page.Config {
 		out[k] = v
 	}
-	title := strings.TrimSpace(s.fields[0].Value())
-	if title == "" {
-		return nil, errors.New("the title is empty")
+	for i, k := range pageFieldKeys {
+		raw := s.fields[i].Value()
+		v := strings.TrimSpace(raw)
+		if k == "title" && v == "" {
+			return nil, errors.New("the title is empty")
+		}
+		// An untouched field keeps what the page has, as Kuma sent it. A
+		// key Kuma did not send was filled with its default, which is sent.
+		if _, had := s.page.Config[k]; had && raw == s.loaded[i] {
+			continue
+		}
+		switch k {
+		case "autoRefreshInterval":
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > maxRefresh {
+				return nil, fmt.Errorf("the refresh is %q; it is seconds, from 0 to %d", v, maxRefresh)
+			}
+			out[k] = n
+		case "domainNameList":
+			out[k] = splitList(v)
+		case "theme":
+			theme := strings.ToLower(v)
+			known := false
+			for _, t := range pageThemes {
+				known = known || t == theme
+			}
+			if !known {
+				return nil, fmt.Errorf("the theme is %q; it is %s", v, strings.Join(pageThemes, ", "))
+			}
+			out[k] = theme
+		default:
+			out[k] = v
+		}
 	}
-	refresh := strings.TrimSpace(s.fields[3].Value())
-	n, err := strconv.Atoi(refresh)
-	if err != nil || n < 0 {
-		return nil, fmt.Errorf("the refresh is %q; it is seconds, 0 or more", refresh)
-	}
-	theme := strings.ToLower(strings.TrimSpace(s.fields[5].Value()))
-	known := false
-	for _, t := range pageThemes {
-		known = known || t == theme
-	}
-	if !known {
-		return nil, fmt.Errorf("the theme is %q; it is %s", theme, strings.Join(pageThemes, ", "))
-	}
-	out["title"] = title
-	out["description"] = strings.TrimSpace(s.fields[1].Value())
-	out["footerText"] = strings.TrimSpace(s.fields[2].Value())
-	out["autoRefreshInterval"] = n
-	out["domainNameList"] = splitList(s.fields[4].Value())
-	out["theme"] = theme
 	for _, t := range s.toggles {
 		out[t.key] = t.on
 	}
@@ -163,8 +199,18 @@ func (s pageSettings) Config() (map[string]any, error) {
 
 func (s pageSettings) View() string {
 	var b strings.Builder
-	b.WriteString(s.view("Settings of "+s.page.Title, "refresh in seconds · domains comma separated · theme auto, light or dark"))
-	b.WriteString("\n\n")
+	b.WriteString(styleHeading.Render("Settings of "+s.page.Title) + "\n")
+	b.WriteString(styleLabel.Render("refresh in seconds · domains comma separated · theme auto, light or dark") + "\n\n")
+	for i := 0; i < s.shown; i++ {
+		b.WriteString(s.fields[i].View() + "\n")
+		if s.multiline[i] {
+			b.WriteString(styleLabel.Render("             multi-line in Kuma; editing here makes it one line") + "\n")
+		}
+	}
+	if s.err != "" {
+		b.WriteString("\n" + styleErr.Render(s.err) + "\n")
+	}
+	b.WriteString("\n")
 	for i, t := range s.toggles {
 		mark := "[ ]"
 		if t.on {
@@ -179,7 +225,7 @@ func (s pageSettings) View() string {
 		b.WriteString(line + "\n")
 	}
 	b.WriteString(styleFooter.Render(styleKey.Render("space") + " toggle   " +
-		styleKey.Render("tab") + " to the toggles   " + styleKey.Render("enter") + " save from anywhere"))
+		styleKey.Render("tab") + " next   " + styleKey.Render("enter") + " save   " + styleKey.Render("esc") + " cancel"))
 	return b.String()
 }
 
