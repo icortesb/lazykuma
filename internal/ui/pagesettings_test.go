@@ -11,7 +11,18 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/icortesb/lazykuma/internal/kuma"
+	"github.com/icortesb/lazykuma/internal/state"
 )
+
+// Config is the page's config as the form would save it over the page it
+// was built from.
+func (s pageSettings) Config() (map[string]any, error) {
+	changes, err := s.Changes()
+	if err != nil {
+		return nil, err
+	}
+	return withChanges(s.page.Config, changes), nil
+}
 
 func TestPageSettingsKeepWhatTheFormDoesNotShow(t *testing.T) {
 	p := kuma.StatusPage{ID: 7, Slug: "shop-status", Title: "Shop status", Config: map[string]any{
@@ -186,5 +197,31 @@ func TestPageSettingsRefreshRange(t *testing.T) {
 	f.fields[3].SetValue("86400")
 	if cfg, err := f.Config(); err != nil || cfg["autoRefreshInterval"] != 86400 {
 		t.Errorf("a day: %v %v", cfg, err)
+	}
+}
+
+func TestPageSettingsSaveOverTheSettingsAsTheyAreNow(t *testing.T) {
+	h := onInstance(t, state.Apply(twoMonitors(), kuma.StatusPageList{Pages: []kuma.StatusPage{
+		{ID: 8, Slug: "restyled", Title: "Restyled", Config: map[string]any{"slug": "restyled", "title": "Restyled"}},
+	}}, tBase))
+	h.fakes["home"].Handle("/api/status-page/restyled", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"incidents":[],"publicGroupList":[]}`))
+	})
+	h.press("S", "e")
+	if h.m.screen != screenPageSettings {
+		t.Fatalf("e did not open the settings:\n%s", h.view())
+	}
+	// The web UI changes the CSS, the footer and a toggle while the form is
+	// open; the form changes the description.
+	h.m.pset.fields[1].SetValue("All systems")
+	h.press("enter")
+	f := h.fakes["home"]
+	for _, want := range []string{`"customCSS":"body{color:red}"`, `"footerText":"From the web"`, `"description":"All systems"`, `"showTags":true`} {
+		if !f.Sent(want) {
+			t.Errorf("save lacks %s: %v", want, f.Frames())
+		}
+	}
+	if h.m.screen != screenPages || !strings.Contains(h.view(), "saved status page Shop status") {
+		t.Errorf("after save: %v\n%s", h.m.screen, h.view())
 	}
 }

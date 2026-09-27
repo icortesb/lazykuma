@@ -651,13 +651,13 @@ func (m Model) updatePageSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case formCancel:
 		m.screen = m.backTo
 	case formSubmit:
-		config, err := m.pset.Config()
+		changes, err := m.pset.Changes()
 		if err != nil {
 			m.pset.err = err.Error()
 			return m, nil
 		}
 		m.pset.err = ""
-		return m, sentFrom(screenPageSettings, savePageSettings(m.current().inst, m.pset.page.Slug, config))
+		return m, sentFrom(screenPageSettings, savePageSettings(m.current().inst, m.pset.page.Slug, m.pset.page.Title, changes))
 	}
 	return m, cmd
 }

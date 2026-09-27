@@ -21,6 +21,7 @@ var pageThemes = []string{"auto", "light", "dark"}
 type pageToggle struct {
 	key, name string
 	on        bool
+	was       bool // as the form filled it
 }
 
 // pageSettings edits a page's settings. saveStatusPage replaces the page
@@ -97,6 +98,7 @@ func newPageSettings(p kuma.StatusPage) pageSettings {
 	}}
 	for i := range s.toggles {
 		s.toggles[i].on, _ = c[s.toggles[i].key].(bool)
+		s.toggles[i].was = s.toggles[i].on
 	}
 	return s
 }
@@ -150,13 +152,24 @@ func (s pageSettings) prevToggle() (pageSettings, formAction, tea.Cmd) {
 	return s, formNone, cmd
 }
 
-// Config is the page's config with the form's settings in it: a copy, so
-// the page the form was built from is left as Kuma sent it.
-func (s pageSettings) Config() (map[string]any, error) {
-	out := make(map[string]any, len(s.page.Config)+9)
-	for k, v := range s.page.Config {
+// withChanges is a copy of a page's config with changes laid over it.
+func withChanges(config, changes map[string]any) map[string]any {
+	out := make(map[string]any, len(config)+len(changes))
+	for k, v := range config {
 		out[k] = v
 	}
+	for k, v := range changes {
+		out[k] = v
+	}
+	return out
+}
+
+// Changes are the settings the user changed in the form, and the ones Kuma
+// did not send, which the form filled with Kuma's defaults. Only these are
+// laid over the page as Kuma has it when it is saved: the web UI may have
+// changed the others since the form opened.
+func (s pageSettings) Changes() (map[string]any, error) {
+	out := map[string]any{}
 	for i, k := range pageFieldKeys {
 		raw := s.fields[i].Value()
 		v := strings.TrimSpace(raw)
@@ -192,7 +205,9 @@ func (s pageSettings) Config() (map[string]any, error) {
 		}
 	}
 	for _, t := range s.toggles {
-		out[t.key] = t.on
+		if _, had := s.page.Config[t.key]; !had || t.on != t.was {
+			out[t.key] = t.on
+		}
 	}
 	return out, nil
 }
@@ -248,20 +263,29 @@ func loadPage(in *core.Instance, slug string) tea.Cmd {
 	}
 }
 
-// savePageSettings saves a page's settings with the sections it has right
-// now: saveStatusPage replaces the sections too, and only the public page
-// gives them. If they cannot be read, nothing is saved, for saving without
-// them would wipe them.
-func savePageSettings(in *core.Instance, slug string, config map[string]any) tea.Cmd {
+// savePageSettings saves the form's changes over the page's settings and
+// sections as they are right now: saveStatusPage replaces all of them, and
+// the web UI may have changed any since the form opened, the custom CSS or
+// the analytics the form does not show among them. Only the public page
+// gives the sections. If either cannot be read, nothing is saved, for
+// saving without them would reset them.
+func savePageSettings(in *core.Instance, slug, title string, changes map[string]any) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
-		name := "status page " + fieldText(config["title"])
+		if t, ok := changes["title"]; ok {
+			title = fieldText(t)
+		}
+		name := "status page " + title
+		p, err := in.GetStatusPage(ctx, slug)
+		if err != nil {
+			return actionDone{name: in.Name(), action: "saved", mon: name, err: fmt.Errorf("nothing saved, its settings could not be read: %s", kuma.Brief(err))}
+		}
 		pub, err := in.PublicPage(ctx, slug)
 		if err != nil {
 			return actionDone{name: in.Name(), action: "saved", mon: name, err: fmt.Errorf("nothing saved, its sections could not be read: %s", kuma.Brief(err))}
 		}
-		err = in.SaveStatusPage(ctx, slug, config, pub.Sections)
+		err = in.SaveStatusPage(ctx, slug, withChanges(p.Config, changes), pub.Sections)
 		return actionDone{name: in.Name(), action: "saved", mon: name, err: err}
 	}
 }

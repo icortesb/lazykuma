@@ -86,6 +86,7 @@ func newHarness(t *testing.T, loggedIn []string, names ...string) *harness {
 // kumaWrites answers login and the write calls the UI tests make.
 func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 	login := kumatest.Login(false)
+	restyled := 0
 	return func(event string, args []json.RawMessage) any {
 		switch event {
 		case "add":
@@ -174,10 +175,19 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 		case "getStatusPage":
 			var slug string
 			json.Unmarshal(args[0], &slug)
-			return map[string]any{"ok": true, "config": map[string]any{
+			config := map[string]any{
 				"id": 7, "slug": slug, "title": "Shop status", "icon": "/icon.svg", "published": true,
 				"domainNameList": []string{}, "customCSS": "body{}",
-			}}
+			}
+			if slug == "restyled" {
+				// A page the web UI changes after its first read.
+				restyled++
+				config["footerText"], config["showTags"] = nil, false
+				if restyled > 1 {
+					config["customCSS"], config["footerText"], config["showTags"] = "body{color:red}", "From the web", true
+				}
+			}
+			return map[string]any{"ok": true, "config": config}
 		case "saveStatusPage", "deleteStatusPage", "unpinIncident":
 			return map[string]any{"ok": true}
 		case "postIncident":
