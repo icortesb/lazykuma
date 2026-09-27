@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/icortesb/lazykuma/internal/core"
@@ -121,10 +122,10 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					question: fmt.Sprintf("Delete %s and its %s?", g.Name, monitors(countMonitors(m.current().st, g))),
 					detail:   "Kuma removes every monitor in the group and all of their history",
 				}
-				m.onYes, m.backTo, m.screen = deleteGroup(m.current().inst, g, true), screenInstance, screenConfirm
+				m.onYes, m.screen = deleteGroup(m.current().inst, g, true), screenConfirm
 				return m, nil
 			}
-			m.screen = screenInstance
+			m.screen = m.backTo
 		}
 	}
 	return m, nil
@@ -365,12 +366,12 @@ func (m Model) updateIncidents(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // loadMonitor fetches the whole monitor: Kuma replaces a monitor with what
 // an edit sends, so an edit must start from everything it holds.
-func loadMonitor(in *core.Instance, id int, mode loadMode) tea.Cmd {
+func loadMonitor(in *core.Instance, id int, mode loadMode, from screen) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
 		defer cancel()
 		mon, err := in.GetMonitor(ctx, id)
-		return monitorLoaded{instance: in.Name(), mon: mon, mode: mode, err: err}
+		return monitorLoaded{instance: in.Name(), id: id, mon: mon, mode: mode, from: from, err: err}
 	}
 }
 
@@ -475,4 +476,68 @@ func endSilence(in *core.Instance, w kuma.Maintenance) tea.Cmd {
 		defer cancel()
 		return actionDone{name: in.Name(), action: "ended", mon: w.Title, err: in.DeleteMaintenance(ctx, w.ID)}
 	}
+}
+
+// onDetail is whether the user is on the monitor's detail: on it, or on a
+// form, picker, question or help opened from it, which return there.
+func (m Model) onDetail() bool {
+	switch m.screen {
+	case screenDetail:
+		return true
+	case screenHelp:
+		return m.back == screenDetail
+	case screenPick, screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag:
+		return m.backTo == screenDetail
+	}
+	return false
+}
+
+// refreshDetail builds the detail afresh, on the period it shows, and
+// fetches its chart and its first page of events again.
+func (m Model) refreshDetail() (detailScreen, tea.Cmd) {
+	in, id, period := m.current(), m.detail.id, m.detail.period
+	d := newDetailScreen(id, in.st)
+	d.period = period
+	return d, tea.Batch(loadChart(in.inst, id, chartPeriods[period].hours), loadEvents(in.inst, id, 0))
+}
+
+func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	mon, ok := in.st.Monitors[m.detail.id]
+	if !ok {
+		m.screen = screenInstance
+		return m, nil
+	}
+	if key.Matches(msg, keys.Help) {
+		m.back, m.screen = screenDetail, screenHelp
+		return m, nil
+	}
+	var act detailAction
+	var mact instAction
+	m.detail, act, mact = m.detail.Update(msg, in.st)
+	switch act {
+	case detBack:
+		m.screen = screenInstance
+	case detPeriod:
+		return m, loadChart(in.inst, mon.ID, chartPeriods[m.detail.period].hours)
+	case detMore:
+		return m, loadEvents(in.inst, mon.ID, len(m.detail.events))
+	case detMonitor:
+		// The detail's monitor as the list would give it: a monitor, never
+		// a group, so the actions take the monitor path.
+		return m.actOn(mact, state.Row{Monitor: mon, Rollup: mon.Status()}, screenDetail)
+	case detClearEvents:
+		m.ask = confirm{
+			question: fmt.Sprintf("Clear the events of %s?", mon.Name),
+			detail:   "Kuma removes its past state changes from the history; its beats and uptime stay",
+		}
+		m.onYes, m.backTo, m.screen = clearEvents(in.inst, mon), screenDetail, screenConfirm
+	case detClearHistory:
+		m.ask = confirm{
+			question: fmt.Sprintf("Clear the history of %s?", mon.Name),
+			detail:   "Kuma deletes all of its beats, state changes and uptime statistics; the chart starts again from now",
+		}
+		m.onYes, m.backTo, m.screen = clearHistory(in.inst, mon), screenDetail, screenConfirm
+	}
+	return m, nil
 }

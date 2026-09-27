@@ -405,6 +405,44 @@ func (i *Instance) DeleteMonitorTag(ctx context.Context, tagID, monitorID int, v
 	return s.DeleteMonitorTag(ctx, tagID, monitorID, value)
 }
 
+// ChartData is a monitor's history over the last hours, oldest first.
+func (i *Instance) ChartData(ctx context.Context, monitorID, hours int) ([]kuma.ChartPoint, error) {
+	s, err := i.session()
+	if err != nil {
+		return nil, err
+	}
+	return s.ChartData(ctx, monitorID, hours)
+}
+
+// ImportantBeats is a page of a monitor's state changes, newest first.
+func (i *Instance) ImportantBeats(ctx context.Context, monitorID, offset, count int) ([]kuma.Beat, error) {
+	s, err := i.session()
+	if err != nil {
+		return nil, err
+	}
+	return s.ImportantBeats(ctx, monitorID, offset, count)
+}
+
+// ClearEvents removes a monitor's past state changes from its history; its
+// beats and uptime stay.
+func (i *Instance) ClearEvents(ctx context.Context, monitorID int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.ClearEvents(ctx, monitorID)
+}
+
+// ClearHeartbeats deletes all of a monitor's beats, state changes and uptime
+// statistics.
+func (i *Instance) ClearHeartbeats(ctx context.Context, monitorID int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.ClearHeartbeats(ctx, monitorID)
+}
+
 // SaveNotification creates a channel, or edits the one with that id.
 func (i *Instance) SaveNotification(ctx context.Context, cfg map[string]any, id int) (int, error) {
 	s, err := i.session()

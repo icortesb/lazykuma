@@ -140,6 +140,33 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			return map[string]any{"ok": true, "msg": "Saved."}
 		case "editTag", "deleteTag", "deleteMonitorTag":
 			return map[string]any{"ok": true, "msg": "Saved."}
+		case "getMonitorChartData":
+			return map[string]any{"ok": true, "data": []map[string]any{
+				{"up": 0, "down": 0, "avgPing": 0, "minPing": 0, "maxPing": 0, "timestamp": 1789610400},
+				{"up": 3, "down": 0, "avgPing": 120, "minPing": 90, "maxPing": 410, "timestamp": 1789610340},
+				{"up": 3, "down": 0, "avgPing": 40, "minPing": 30, "maxPing": 50, "timestamp": 1789610280},
+			}}
+		case "monitorImportantHeartbeatListPaged":
+			var id, offset, count int
+			json.Unmarshal(args[0], &id)
+			json.Unmarshal(args[1], &offset)
+			json.Unmarshal(args[2], &count)
+			// 30 state changes in all, newest first, so a second page exists.
+			var page []map[string]any
+			for i := offset; i < 30 && i < offset+count; i++ {
+				status := 1
+				msg := "200 - OK"
+				if i%2 == 1 {
+					status, msg = 0, "connect ETIMEDOUT"
+				}
+				page = append(page, map[string]any{
+					"monitorID": id, "status": status, "important": 1, "msg": msg, "ping": nil,
+					"time": time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC).Add(-time.Duration(i) * time.Hour).Format("2006-01-02 15:04:05.000"),
+				})
+			}
+			return map[string]any{"ok": true, "data": page}
+		case "clearEvents", "clearHeartbeats":
+			return map[string]any{"ok": true}
 		}
 		return login(event, args)
 	}
@@ -402,7 +429,7 @@ func TestHelpListsTheInstanceKeys(t *testing.T) {
 	v := h.view()
 	// The help is built from the same line the instance screen shows, so
 	// the two cannot drift apart.
-	for _, want := range []string{"n new", "d delete", "space fold", "m silence", "c channels", "i incidents", "ctrl+s save", "never written here"} {
+	for _, want := range []string{"n new", "d delete", "space fold", "m silence", "c channels", "i incidents", "enter detail", "On a monitor's detail", "x clear events", "X clear history", "r fields", "ctrl+s save", "never written here"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("help lacks %q:\n%s", want, v)
 		}

@@ -55,6 +55,7 @@ const (
 	screenName      // a group's name
 	screenTags      // an instance's tags
 	screenTag       // one tag's form
+	screenDetail    // one monitor at full size
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -93,6 +94,7 @@ type Model struct {
 	nform    nameForm
 	tags     tagsScreen
 	tform    tagForm
+	detail   detailScreen
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -139,6 +141,9 @@ type (
 		// monitor whose tags failed: the form must close all the same, or a
 		// retry would create the monitor a second time.
 		saved bool
+		// monitorID is the monitor a clear was for, so the detail refetches
+		// only its own history.
+		monitorID int
 	}
 	loginDone struct {
 		name  string
@@ -149,8 +154,10 @@ type (
 	// or the field editor.
 	monitorLoaded struct {
 		instance string // which instance asked: the user can move on
+		id       int    // which monitor was asked for
 		mon      kuma.RawMonitor
 		mode     loadMode
+		from     screen // where the fetch was asked from, and where its form returns
 		err      error
 	}
 	flashMsg      struct{ text string }
@@ -202,11 +209,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inst = m.inst.pin(prev)
 		}
 		m.insts[i].st = msg.State
+		// The detail's monitor was deleted, here or in the web UI: there is
+		// nothing left to show.
+		if i == m.cur && m.screen == screenDetail {
+			if _, ok := msg.State.Monitors[m.detail.id]; !ok {
+				m.screen = screenInstance
+			}
+		}
 		// Kuma only gives the tags when asked, and a session that was not
 		// up yet when the instance opened could not answer: ask again once
 		// it is, or a clone made now would find no tags to copy.
 		if i == m.cur && m.screen != screenMenu && msg.State.Conn == state.ConnOK && prev.Conn != state.ConnOK {
-			return m, loadTags(m.insts[i].inst)
+			tags := loadTags(m.insts[i].inst)
+			// A detail open through the outage could fetch nothing while it
+			// lasted, and missed the state changes of its duration: fetch its
+			// chart and its events again, for the period on screen.
+			if _, ok := msg.State.Monitors[m.detail.id]; ok && m.onDetail() {
+				var fetch tea.Cmd
+				m.detail, fetch = m.refreshDetail()
+				return m, tea.Batch(tags, fetch)
+			}
+			return m, tags
 		}
 		return m, nil
 
@@ -226,6 +249,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = m.backTo
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
+		if m.screen == screenDetail {
+			if _, ok := m.current().st.Monitors[m.detail.id]; !ok {
+				m.screen = screenInstance
+			}
+		}
+		if strings.HasPrefix(msg.action, "cleared") && msg.name == m.current().name() && msg.monitorID == m.detail.id && m.onDetail() {
+			// What was cleared is fetched again, for the period on screen,
+			// while the user is still on that detail: a form opened from it
+			// meanwhile returns to it. One left behind is built afresh when
+			// opened again.
+			var fetch tea.Cmd
+			m.detail, fetch = m.refreshDetail()
+			return m, tea.Batch(done, fetch)
+		}
 		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
 			return m, tea.Batch(done, loadTags(m.current().inst))
 		}
@@ -247,14 +284,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			return m, flashFor(kuma.Brief(msg.err), 8*time.Second)
 		}
-		if m.screen != screenInstance || m.current().name() != msg.instance {
+		if m.screen != msg.from || m.current().name() != msg.instance || (msg.from == screenDetail && m.detail.id != msg.id) {
 			// The user moved on while Kuma was answering; an edit opened now
-			// would save one instance's monitor into another.
+			// would save one instance's monitor into another, or open over
+			// the detail of another monitor.
 			return m, nil
 		}
 		if msg.mode == loadRaw {
 			m.raw = newRawEditor("monitor", 0, msg.mon)
-			m.backTo, m.screen = screenInstance, screenRaw
+			m.backTo, m.screen = msg.from, screenRaw
 			return m, nil
 		}
 		kind, _ := msg.mon["type"].(string)
@@ -269,7 +307,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.mode == loadClone {
 				m.raw.cloneTags = rawTags(msg.mon["tags"])
 			}
-			m.backTo, m.screen = screenInstance, screenRaw
+			m.backTo, m.screen = msg.from, screenRaw
 			return m, nil
 		}
 		lists := m.formLists(0, true)
@@ -278,7 +316,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.mform = editMonitorForm(msg.mon, lists)
 		}
-		m.backTo, m.screen = screenInstance, screenMonitor
+		m.backTo, m.screen = msg.from, screenMonitor
+		return m, nil
+
+	// The detail takes its answers whatever is on screen: a question or a
+	// form opened from it before they landed returns to it, and it must not
+	// be left loading. It drops those for another monitor, period or page.
+	case chartLoaded:
+		if m.current().name() == msg.instance {
+			m.detail = m.detail.withChart(msg)
+		}
+		return m, nil
+	case eventsLoaded:
+		if m.current().name() == msg.instance {
+			m.detail = m.detail.withEvents(msg)
+		}
 		return m, nil
 
 	case loginDone:
@@ -312,6 +364,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateIncidents(msg)
 		case screenTags:
 			return m.updateTags(msg)
+		case screenDetail:
+			return m.updateDetail(msg)
 		case screenConfirm:
 			answered, yes := m.ask.Update(msg)
 			if !answered {
@@ -418,26 +472,10 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch act {
 	case instBack:
 		m.screen = screenMenu
-	case instToggle:
-		if !hasRow {
-			break
+	case instToggle, instEdit, instRaw, instClone, instDelete, instSilence, instMove:
+		if hasRow {
+			return m.actOn(act, row, screenInstance)
 		}
-		if row.Group {
-			verb, detail := "Pause", "Kuma stops checking every monitor in the group until it is resumed"
-			if !row.Active {
-				verb, detail = "Resume", "every monitor in the group is resumed, including any paused on its own"
-			}
-			m.ask = confirm{
-				question: fmt.Sprintf("%s %s and its %s?", verb, row.Name, monitors(row.Children)),
-				detail:   detail,
-			}
-			// The ids are taken now: the group can change while the question
-			// is on screen, and the answer is to what was asked.
-			ids := coveredBy(in.st, row.Monitor)
-			m.onYes, m.backTo, m.screen = toggleGroup(in.inst, row.Monitor, ids), screenInstance, screenConfirm
-			break
-		}
-		cmd = togglePause(in.inst, row.Monitor)
 	case instNew:
 		options := make([]option, 0, len(curatedKinds)+1)
 		for _, k := range curatedKinds {
@@ -446,56 +484,9 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		options = append(options, option{"Other type…", "other"})
 		m.pick = newPicker("New monitor", "what should it watch?", options)
 		m.picking, m.backTo, m.screen = "monitor", screenInstance, screenPick
-	case instEdit:
-		if hasRow && row.Group {
-			m.nform = newNameForm("Rename group", "", row.Name, row.ID)
-			m.backTo, m.screen = screenInstance, screenName
-			break
-		}
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadEdit)
-		}
-	case instRaw:
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadRaw)
-		}
-	case instClone:
-		if hasRow {
-			cmd = loadMonitor(in.inst, row.ID, loadClone)
-		}
-	case instDelete:
-		if !hasRow {
-			break
-		}
-		if row.Group {
-			m.moving = row.Monitor
-			m.pick = newPicker("Delete group "+row.Name, "", []option{
-				{fmt.Sprintf("Delete the group, keep its %s", monitors(row.Children)), "keep"},
-				{fmt.Sprintf("Delete the group and its %s", monitors(row.Children)), "all"},
-				{"Cancel", "cancel"},
-			})
-			m.picking, m.backTo, m.screen = "delgroup", screenInstance, screenPick
-			break
-		}
-		m.ask = confirm{
-			question: fmt.Sprintf("Delete %q?", row.Name),
-			detail:   "Kuma removes the monitor and all of its history",
-		}
-		m.onYes, m.backTo, m.screen = deleteMonitor(in.inst, row.Monitor), screenInstance, screenConfirm
-	case instSilence:
-		if hasRow {
-			m.silence = newSilenceForm(row.Monitor, coveredBy(in.st, row.Monitor))
-			m.backTo, m.screen = screenInstance, screenSilence
-		}
 	case instNewGroup:
 		m.nform = newNameForm("New group", "monitors move into it with v", "", 0)
 		m.backTo, m.screen = screenInstance, screenName
-	case instMove:
-		if hasRow {
-			m.moving = row.Monitor
-			m.pick = newPicker("Move "+row.Name, "into which group?", groupOptions(in.st, row.Monitor))
-			m.picking, m.backTo, m.screen = "move", screenInstance, screenPick
-		}
 	case instSilenced:
 		m.silenced, m.screen = maintenanceScreen{}, screenSilenced
 	case instChannels:
@@ -505,6 +496,12 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case instTags:
 		m.tags, m.screen = tagsScreen{}, screenTags
 		cmd = loadTags(in.inst)
+	case instDetail:
+		if hasRow {
+			m.detail, m.screen = newDetailScreen(row.ID, in.st), screenDetail
+			hours := chartPeriods[m.detail.period].hours
+			return m, tea.Batch(loadChart(in.inst, row.ID, hours), loadEvents(in.inst, row.ID, 0))
+		}
 	}
 	return m, cmd
 }
@@ -643,6 +640,8 @@ func (m Model) render() string {
 		return m.chrome(m.tags.View(in.name(), m.tagDefs[in.name()], m.width, m.height-2), "")
 	case screenTag:
 		return m.chrome(m.tform.View(), "")
+	case screenDetail:
+		return m.chrome(m.detail.View(m.current().st, m.width, m.height-2), keyHintsDetail)
 	}
 
 	names := make([]string, len(m.insts))
@@ -672,8 +671,8 @@ func (m Model) chrome(body, hint string) string {
 }
 
 func helpText() string {
-	// The instance keys come from the same line the instance screen shows,
-	// so the two cannot drift apart.
+	// The instance and detail keys come from the same lines those screens
+	// show, so the two cannot drift apart.
 	var b strings.Builder
 	b.WriteString(styleHeading.Render("Keys") + "\n\n")
 	for _, r := range [][2]string{
@@ -686,10 +685,15 @@ func helpText() string {
 	} {
 		b.WriteString(fmt.Sprintf("  %s  %s\n", styleKey.Render(fmt.Sprintf("%-8s", r[0])), styleValue.Render(r[1])))
 	}
-	b.WriteString("\n" + styleHeading.Render("On an instance") + "\n\n")
-	for _, part := range strings.Split(keyHints, "   ") {
-		if part = strings.TrimSpace(part); part != "" {
-			b.WriteString("  " + styleValue.Render(part) + "\n")
+	for _, sec := range []struct{ heading, hints string }{
+		{"On an instance", keyHints},
+		{"On a monitor's detail", keyHintsDetail},
+	} {
+		b.WriteString("\n" + styleHeading.Render(sec.heading) + "\n\n")
+		for _, part := range strings.Split(sec.hints, "   ") {
+			if part = strings.TrimSpace(part); part != "" {
+				b.WriteString("  " + styleValue.Render(part) + "\n")
+			}
 		}
 	}
 	b.WriteString("\n" + styleHeading.Render("In the field editor") + "\n\n")
