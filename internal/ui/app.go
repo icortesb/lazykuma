@@ -43,22 +43,23 @@ const (
 	screenLogin
 	screenAdd
 	screenHelp
-	screenPick       // a type or a service, before its form
-	screenMonitor    // the curated monitor form
-	screenRaw        // the raw field editor
-	screenChannels   // the instance's notification channels
-	screenChannel    // one channel's form
-	screenSilence    // silence a monitor
-	screenSilenced   // what is silenced
-	screenIncidents  // state changes
-	screenConfirm    // before something irreversible
-	screenName       // a group's name
-	screenTags       // an instance's tags
-	screenTag        // one tag's form
-	screenDetail     // one monitor at full size
-	screenPages      // an instance's status pages
-	screenPageNew    // a new status page's title and slug
-	screenPageDelete // a page's slug, before deleting it
+	screenPick         // a type or a service, before its form
+	screenMonitor      // the curated monitor form
+	screenRaw          // the raw field editor
+	screenChannels     // the instance's notification channels
+	screenChannel      // one channel's form
+	screenSilence      // silence a monitor
+	screenSilenced     // what is silenced
+	screenIncidents    // state changes
+	screenConfirm      // before something irreversible
+	screenName         // a group's name
+	screenTags         // an instance's tags
+	screenTag          // one tag's form
+	screenDetail       // one monitor at full size
+	screenPages        // an instance's status pages
+	screenPageNew      // a new status page's title and slug
+	screenPageDelete   // a page's slug, before deleting it
+	screenPageSettings // a page's settings
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -101,6 +102,7 @@ type Model struct {
 	pages    pagesScreen
 	pnew     newPageForm
 	pdel     slugConfirm
+	pset     pageSettings
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -252,7 +254,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// since, for something else.
 		switch m.screen {
 		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag,
-			screenPageNew, screenPageDelete:
+			screenPageNew, screenPageDelete, screenPageSettings:
 			m.screen = m.backTo
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
@@ -324,6 +326,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mform = editMonitorForm(msg.mon, lists)
 		}
 		m.backTo, m.screen = msg.from, screenMonitor
+		return m, nil
+
+	case pageLoaded:
+		if m.screen != screenPages || m.current().name() != msg.instance {
+			// The user moved on while Kuma was answering; a form opened now
+			// would save one instance's page into another.
+			return m, nil
+		}
+		if msg.err != nil {
+			return m, flashFor("status page "+msg.slug+": "+kuma.Brief(msg.err), 8*time.Second)
+		}
+		m.pset = newPageSettings(msg.page)
+		m.backTo, m.screen = screenPages, screenPageSettings
 		return m, nil
 
 	// The detail takes its answers whatever is on screen: a question or a
@@ -414,6 +429,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateTagForm(msg)
 	case screenPageNew:
 		return m.updatePageForm(msg)
+	case screenPageSettings:
+		return m.updatePageSettings(msg)
 	case screenPageDelete:
 		return m.updateSlugConfirm(msg)
 	}
@@ -664,6 +681,8 @@ func (m Model) render() string {
 		return m.chrome(m.pnew.View(), "")
 	case screenPageDelete:
 		return m.chrome(m.pdel.View(), "")
+	case screenPageSettings:
+		return m.chrome(m.pset.View(), "")
 	}
 
 	names := make([]string, len(m.insts))

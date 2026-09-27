@@ -551,6 +551,10 @@ func (m Model) updatePages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch act {
 	case pageBack:
 		m.screen = screenInstance
+	case pageEdit:
+		if ok {
+			return m, loadPage(in.inst, p.Slug)
+		}
 	case pageNew:
 		m.pnew = newNewPageForm()
 		m.backTo, m.screen = screenPages, screenPageNew
@@ -589,6 +593,25 @@ func (m Model) updatePageForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pnew.err = ""
 		return m, addPage(m.current().inst, title, slug)
+	}
+	return m, cmd
+}
+
+func (m Model) updatePageSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pset, act, cmd = m.pset.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		config, err := m.pset.Config()
+		if err != nil {
+			m.pset.err = err.Error()
+			return m, nil
+		}
+		m.pset.err = ""
+		return m, savePageSettings(m.current().inst, m.pset.page.Slug, config)
 	}
 	return m, cmd
 }
