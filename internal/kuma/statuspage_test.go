@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"testing"
@@ -71,6 +72,68 @@ func TestSlugs(t *testing.T) {
 	}
 	if got := PageURL("https://kuma.example.com/", "shop-status"); got != "https://kuma.example.com/status/shop-status" {
 		t.Errorf("PageURL = %q", got)
+	}
+}
+
+// TestPageURLBases checks that PageURL parses base rather than gluing
+// strings onto it, so a path prefix (a reverse proxy) and a query string (say
+// a proxy's own token) both land in the right place instead of the path
+// swallowing the query or the query swallowing the path.
+func TestPageURLBases(t *testing.T) {
+	for _, tc := range []struct {
+		name, base, want string
+	}{
+		{"bare", "https://kuma.example.com", "https://kuma.example.com/status/shop-status"},
+		{"path prefix, trailing slash", "https://kuma.example.com/kuma/", "https://kuma.example.com/kuma/status/shop-status"},
+		{"query string", "https://kuma.example.com/kuma?token=abc", "https://kuma.example.com/kuma/status/shop-status?token=abc"},
+	} {
+		if got := PageURL(tc.base, "shop-status"); got != tc.want {
+			t.Errorf("PageURL(%q) = %q, want %q", tc.base, got, tc.want)
+		}
+	}
+}
+
+// TestFetchPublicPageBases checks the same for FetchPublicPage: it hits the
+// right path on Kuma (a reverse proxy's prefix kept) and keeps any query
+// string base already carries alongside the cache-busting one it adds.
+func TestFetchPublicPageBases(t *testing.T) {
+	var gotPath string
+	var gotQuery url.Values
+	respond := func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.Query()
+		w.Write([]byte(`{"config":{"slug":"it-page"},"incidents":[],"publicGroupList":[],"maintenanceList":[]}`))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/status-page/it-page", respond)
+	mux.HandleFunc("/kuma/api/status-page/it-page", respond)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	for _, tc := range []struct {
+		name, base, wantPath string
+		wantQuery            map[string]string // besides the cache-busting parameter
+	}{
+		{"bare", srv.URL, "/api/status-page/it-page", nil},
+		{"path prefix, trailing slash", srv.URL + "/kuma/", "/kuma/api/status-page/it-page", nil},
+		{"query string", srv.URL + "/kuma?token=abc", "/kuma/api/status-page/it-page", map[string]string{"token": "abc"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotPath, gotQuery = "", nil
+			if _, err := FetchPublicPage(context.Background(), tc.base, "it-page"); err != nil {
+				t.Fatal(err)
+			}
+			if gotPath != tc.wantPath {
+				t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
+			}
+			if gotQuery.Get("lazykuma") == "" {
+				t.Errorf("no cache-busting query parameter: %v", gotQuery)
+			}
+			for k, want := range tc.wantQuery {
+				if got := gotQuery.Get(k); got != want {
+					t.Errorf("query %s = %q, want %q", k, got, want)
+				}
+			}
+		})
 	}
 }
 

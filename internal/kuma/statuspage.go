@@ -90,9 +90,21 @@ func SlugFrom(title string) string {
 	return b.String()
 }
 
-// PageURL is where a status page is published.
+// PageURL is where a status page is published: base's scheme, host and any
+// path prefix a reverse proxy needs, with /status/<slug> appended. Base's
+// own query string, if it carries one for that proxy, is kept; its
+// fragment is dropped. Parsing base first, rather than gluing strings, is
+// what keeps a path prefix and a query string from landing in the wrong
+// place (see FetchPublicPage). If base does not parse, the strings are
+// joined as before, malformed as that path may end up.
 func PageURL(base, slug string) string {
-	return strings.TrimRight(strings.TrimSpace(base), "/") + "/status/" + slug
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil {
+		return strings.TrimRight(strings.TrimSpace(base), "/") + "/status/" + slug
+	}
+	u = u.JoinPath("status", slug)
+	u.Fragment, u.RawFragment = "", ""
+	return u.String()
 }
 
 func decodeStatusPage(raw json.RawMessage) (StatusPage, error) {
@@ -300,14 +312,22 @@ func decodeIncident(raw json.RawMessage) (PageIncident, error) {
 // UnpinIncident, neither of which flushes the cache the way SaveStatusPage
 // and DeleteStatusPage do. A visitor's browser, with no such query string
 // of its own, can still see Kuma's cached copy for up to 5 minutes.
+//
+// base is parsed first, rather than glued onto the path as a string: base
+// may carry its own path prefix (a reverse proxy) or query string (say, a
+// proxy's own token), and gluing strings would fold either of those into
+// the wrong place, or worse, turn a "?" in base into part of the path.
+// Any existing query parameters are kept alongside the cache-busting one.
 func FetchPublicPage(ctx context.Context, base, slug string) (PublicPage, error) {
-	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(base), "/") + "/api/status-page/" + url.PathEscape(slug))
+	u, err := url.Parse(strings.TrimSpace(base))
 	if err != nil {
 		return PublicPage{}, fmt.Errorf("kuma: status page %s: %w", slug, err)
 	}
+	u = u.JoinPath("api", "status-page", slug)
 	q := u.Query()
 	q.Set("lazykuma", strconv.FormatInt(time.Now().UnixNano(), 10))
 	u.RawQuery = q.Encode()
+	u.Fragment, u.RawFragment = "", ""
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return PublicPage{}, err
