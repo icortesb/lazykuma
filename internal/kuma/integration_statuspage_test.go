@@ -87,7 +87,7 @@ func TestIntegrationStatusPages(t *testing.T) {
 	page.Config["description"] = "from lazykuma"
 	page.Config["customCSS"] = "body{color:red}"
 	if err := s.SaveStatusPage(ctx, slug, page.Config, []PageSection{
-		{Name: "Services", Monitors: []PageMonitor{{ID: monitorID}}},
+		{Name: "Services", Monitors: []PageMonitor{{ID: monitorID, SendURL: true}}},
 	}); err != nil {
 		t.Fatalf("SaveStatusPage: %v", err)
 	}
@@ -109,11 +109,20 @@ func TestIntegrationStatusPages(t *testing.T) {
 		t.Fatalf("FetchPublicPage sections = %+v", pub.Sections)
 	}
 	sectionID := pub.Sections[0].ID
+	// A monitor saved with its link shown comes back with sendUrl set and
+	// the monitor's own URL: Kuma stores the flag, and fills in the URL
+	// from the monitor when it serves the page.
+	linked := pub.Sections[0].Monitors[0]
+	t.Logf("public page monitor after a save with sendUrl: %+v", linked)
+	if !linked.SendURL || linked.URL != "https://example.com" {
+		t.Fatalf("public page monitor after a save with sendUrl = %+v", linked)
+	}
 
 	// Saving again with the section's own id updates it in place rather than
-	// creating a second one.
+	// creating a second one; the monitor goes back as it was read, as the
+	// sections editor sends it, and keeps its link.
 	if err := s.SaveStatusPage(ctx, slug, page.Config, []PageSection{
-		{ID: sectionID, Name: "Core", Monitors: []PageMonitor{{ID: monitorID}}},
+		{ID: sectionID, Name: "Core", Monitors: pub.Sections[0].Monitors},
 	}); err != nil {
 		t.Fatalf("SaveStatusPage (rename section): %v", err)
 	}
@@ -123,6 +132,9 @@ func TestIntegrationStatusPages(t *testing.T) {
 	}
 	if len(pub.Sections) != 1 || pub.Sections[0].ID != sectionID || pub.Sections[0].Name != "Core" {
 		t.Fatalf("FetchPublicPage after rename = %+v", pub.Sections)
+	}
+	if len(pub.Sections[0].Monitors) != 1 || pub.Sections[0].Monitors[0] != linked {
+		t.Fatalf("public page monitors after a second save = %+v, want %+v", pub.Sections[0].Monitors, linked)
 	}
 
 	inc, err := s.PostIncident(ctx, slug, PageIncident{Title: "Down", Content: "We are on it", Style: "danger"})
