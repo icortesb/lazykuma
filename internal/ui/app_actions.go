@@ -18,6 +18,20 @@ import (
 // login on a large idle instance can take half a minute.
 const actionTimeout = 45 * time.Second
 
+// sentFrom stamps the form a write is sent from on the write's answer, so
+// that the answer closes that form and no other: a form opened while the
+// write was on its way stays open.
+func sentFrom(from screen, cmd tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		msg := cmd()
+		if done, ok := msg.(actionDone); ok {
+			done.from = from
+			return done
+		}
+		return msg
+	}
+}
+
 // current is the instance the screens are working on.
 func (m Model) current() instance { return m.insts[m.cur] }
 
@@ -161,9 +175,9 @@ func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.nform.id == 0 {
-			return m, addGroup(m.current().inst, name)
+			return m, sentFrom(screenName, addGroup(m.current().inst, name))
 		}
-		return m, renameGroup(m.current().inst, m.nform.id, name)
+		return m, sentFrom(screenName, renameGroup(m.current().inst, m.nform.id, name))
 	}
 	return m, cmd
 }
@@ -209,7 +223,7 @@ func (m Model) updateTagForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tform.err = err.Error()
 			return m, nil
 		}
-		return m, saveTag(m.current().inst, t)
+		return m, sentFrom(screenTag, saveTag(m.current().inst, t))
 	}
 	return m, cmd
 }
@@ -228,7 +242,7 @@ func (m Model) updateMonitorForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		add, remove := m.mform.TagChanges()
-		return m, saveMonitor(m.current().inst, mon, m.mform.id, add, remove)
+		return m, sentFrom(screenMonitor, saveMonitor(m.current().inst, mon, m.mform.id, add, remove))
 	}
 	return m, cmd
 }
@@ -247,13 +261,13 @@ func (m Model) updateRaw(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.raw.what == "channel" {
-			return m, saveChannel(m.current().inst, values, m.raw.id)
+			return m, sentFrom(screenRaw, saveChannel(m.current().inst, values, m.raw.id))
 		}
 		var addTags []kuma.Tag
 		if m.raw.id == 0 {
 			addTags = m.raw.cloneTags
 		}
-		return m, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil)
+		return m, sentFrom(screenRaw, saveMonitor(m.current().inst, kuma.RawMonitor(values), m.raw.id, addTags, nil))
 	}
 	return m, cmd
 }
@@ -325,7 +339,7 @@ func (m Model) updateChannelForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cform.err = err.Error()
 			return m, nil
 		}
-		return m, saveChannel(m.current().inst, cfg, m.cform.id)
+		return m, sentFrom(screenChannel, saveChannel(m.current().inst, cfg, m.cform.id))
 	}
 	return m, cmd
 }
@@ -345,7 +359,7 @@ func (m Model) updateSilence(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// The monitor was chosen when the form opened: the list can reorder
 		// underneath while the times are typed.
-		return m, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end)
+		return m, sentFrom(screenSilence, silenceMonitor(m.current().inst, title, m.silence.monitor, m.silence.covers, start, end))
 	}
 	return m, cmd
 }
@@ -624,7 +638,7 @@ func (m Model) updatePageForm(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pnew.err = ""
-		return m, addPage(m.current().inst, title, slug)
+		return m, sentFrom(screenPageNew, addPage(m.current().inst, title, slug))
 	}
 	return m, cmd
 }
@@ -643,7 +657,7 @@ func (m Model) updatePageSettings(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pset.err = ""
-		return m, savePageSettings(m.current().inst, m.pset.page.Slug, config)
+		return m, sentFrom(screenPageSettings, savePageSettings(m.current().inst, m.pset.page.Slug, config))
 	}
 	return m, cmd
 }
@@ -662,7 +676,7 @@ func (m Model) updatePageIncident(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pinc.err = ""
-		return m, postIncident(m.current().inst, m.pinc.slug, m.pinc.page, inc)
+		return m, sentFrom(screenPageIncident, postIncident(m.current().inst, m.pinc.slug, m.pinc.page, inc))
 	}
 	return m, cmd
 }
@@ -685,7 +699,7 @@ func (m Model) updateSlugConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !ok {
 			p = kuma.StatusPage{Slug: m.pdel.slug, Title: m.pdel.title}
 		}
-		return m, deletePage(in.inst, p)
+		return m, sentFrom(screenPageDelete, deletePage(in.inst, p))
 	}
 	return m, cmd
 }
@@ -707,7 +721,7 @@ func (m Model) updateSections(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.onYes = func() tea.Msg { return sectionsAnswered{discard: true} }
 		m.backTo, m.screen = screenPageSections, screenConfirm
 	case msg.Type == tea.KeyCtrlS:
-		return m, saveSections(m.current().inst, e.slug, e.title, e.sections)
+		return m, sentFrom(screenPageSections, saveSections(m.current().inst, e.slug, e.title, e.sections))
 	case msg.String() == "a":
 		m.nform = newNameForm("New section", "a heading on the page, with monitors under it", "", 0)
 		m.nform.section = "add"

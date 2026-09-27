@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -257,6 +258,33 @@ func monitorOptions(st state.Instance, sec kuma.PageSection) []option {
 	return options
 }
 
+// sectionsSaved is the editor taking its own save's success. It closes only
+// when it still shows what was saved: edited again since, it stays open and
+// not saved. A form, picker or question opened from it stays too, and the
+// editor it returns to is no longer marked as not saved if nothing changed.
+func (m Model) sectionsSaved(saved []kuma.PageSection) Model {
+	if !m.onSections() || !reflect.DeepEqual(m.secs.sections, saved) {
+		return m
+	}
+	m.secs.dirty = false
+	if m.screen == screenPageSections {
+		m.screen = screenPages
+	}
+	return m
+}
+
+// onSections is whether the user is on the sections editor, or on a form,
+// picker or question opened from it.
+func (m Model) onSections() bool {
+	switch m.screen {
+	case screenPageSections:
+		return true
+	case screenPick, screenName, screenConfirm:
+		return m.backTo == screenPageSections
+	}
+	return false
+}
+
 // sectionsLoaded carries a page's sections as a visitor sees them now.
 type sectionsLoaded struct {
 	instance, slug, title string
@@ -293,6 +321,6 @@ func saveSections(in *core.Instance, slug, title string, sections []kuma.PageSec
 		if err != nil {
 			return actionDone{name: in.Name(), action: action, mon: name, err: fmt.Errorf("nothing saved, its settings could not be read: %s", kuma.Brief(err))}
 		}
-		return actionDone{name: in.Name(), action: action, mon: name, err: in.SaveStatusPage(ctx, slug, p.Config, sections)}
+		return actionDone{name: in.Name(), action: action, mon: name, sections: sections, err: in.SaveStatusPage(ctx, slug, p.Config, sections)}
 	}
 }

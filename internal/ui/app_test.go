@@ -183,6 +183,9 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 		case "postIncident":
 			var inc map[string]any
 			json.Unmarshal(args[1], &inc)
+			if inc["title"] == "Refused" {
+				return map[string]any{"ok": false, "msg": "Title is too long"}
+			}
 			inc["id"], inc["pin"] = 3, true
 			return map[string]any{"ok": true, "incident": inc}
 		}
@@ -244,6 +247,18 @@ func (h *harness) run(cmd tea.Cmd) {
 		}
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// hold answers a key as the program would, but keeps back the command it
+// returns, for the test to run when it chooses: a write still on its way.
+func (h *harness) hold(k string) tea.Cmd {
+	h.t.Helper()
+	next, cmd := h.m.Update(keyMsg(k))
+	h.m = next.(Model)
+	if cmd == nil {
+		h.t.Fatalf("%s sent nothing", k)
+	}
+	return cmd
 }
 
 func (h *harness) press(keys ...string) {

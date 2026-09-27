@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -416,5 +417,25 @@ func TestATagFailureAfterARawCloneClosesTheEditor(t *testing.T) {
 	}
 	if v := h.view(); !strings.Contains(v, "created, but tag broken") {
 		t.Errorf("the flash does not say the clone was created:\n%s", v)
+	}
+}
+
+func TestAFormStaysOpenWhenAnotherWriteLands(t *testing.T) {
+	h := onInstance(t, twoMonitors())
+	h.press("n", "enter")
+	if h.m.screen != screenMonitor {
+		t.Fatalf("no monitor form: %v", h.m.screen)
+	}
+	h.typeText("shop")
+	// A pause sent from the list before the form opened, and a create that
+	// saved the monitor but not its tags: neither is this form's.
+	h.send(actionDone{name: "home", action: "paused", mon: "web"})
+	h.send(actionDone{name: "home", action: "created", mon: "api", saved: true, err: errors.New("tag gone")})
+	if h.m.screen != screenMonitor || !strings.Contains(h.view(), "shop") {
+		t.Fatalf("another write's answer closed the form being filled: %v\n%s", h.m.screen, h.view())
+	}
+	h.send(actionDone{name: "home", action: "created", mon: "shop", saved: true, err: errors.New("tag gone"), from: screenMonitor})
+	if h.m.screen != screenInstance {
+		t.Errorf("the form's own half-saved write left it open: %v", h.m.screen)
 	}
 }

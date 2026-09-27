@@ -271,3 +271,74 @@ func TestPageSectionsIgnoreALateLoad(t *testing.T) {
 		t.Fatalf("a load that came after the user left opened the editor: %v", h.m.screen)
 	}
 }
+
+func TestPageSectionsStayOpenWhenAnotherWriteLands(t *testing.T) {
+	h := onInstance(t, withPages(twoMonitors()))
+	h.fakes["home"].Handle("/api/status-page/shop-status", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"incidents":[],"publicGroupList":[{"id":4,"name":"Services","monitorList":[{"id":1,"name":"nextcloud","sendUrl":0}]}]}`))
+	})
+	h.press("S", "u")
+	unpin := h.hold("y")
+	h.press("s", "a")
+	h.typeText("Internal")
+	h.press("enter")
+	if h.m.screen != screenPageSections || !h.m.secs.dirty {
+		t.Fatalf("the edit did not take: %v", h.m.screen)
+	}
+	h.run(unpin)
+	if !h.fakes["home"].Sent(`["unpinIncident","shop-status"]`) {
+		t.Fatalf("the unpin was not sent: %v", h.fakes["home"].Frames())
+	}
+	if h.m.screen != screenPageSections || !h.m.secs.dirty || len(h.m.secs.sections) != 2 {
+		t.Fatalf("the unpin's answer closed the editor and its edits: %v %v", h.m.screen, names(h.m.secs))
+	}
+	if !strings.Contains(h.view(), "unpinned the incident on status page Shop status") {
+		t.Errorf("the unpin's answer is not shown:\n%s", h.view())
+	}
+}
+
+func TestPageSectionsEditedDuringTheSaveStayOpen(t *testing.T) {
+	h := onSections(t)
+	h.press("a")
+	h.typeText("Internal")
+	h.press("enter")
+	save := h.hold("ctrl+s")
+	h.press("a")
+	h.typeText("Edge")
+	h.press("enter")
+	h.run(save)
+	if h.m.screen != screenPageSections || !h.m.secs.dirty {
+		t.Fatalf("the save closed the editor over a later edit: %v dirty %v", h.m.screen, h.m.secs.dirty)
+	}
+	if !reflect.DeepEqual(names(h.m.secs), []string{"Services: nextcloud", "Internal:", "Edge:"}) {
+		t.Errorf("the later edit was lost: %v", names(h.m.secs))
+	}
+
+	// Saved again, and not touched while Kuma saves: now it closes.
+	h.press("ctrl+s")
+	if h.m.screen != screenPages {
+		t.Errorf("a save of what is on screen did not close the editor: %v", h.m.screen)
+	}
+}
+
+func TestPageSectionsSavedUnderAFormOpenedFromThem(t *testing.T) {
+	h := onSections(t)
+	h.press("a")
+	h.typeText("Internal")
+	h.press("enter")
+	save := h.hold("ctrl+s")
+	h.press("r")
+	h.typeText("x")
+	h.run(save)
+	if h.m.screen != screenName || !strings.Contains(h.view(), "Rename section") {
+		t.Fatalf("the save closed the rename being typed: %v\n%s", h.m.screen, h.view())
+	}
+	h.press("esc")
+	if h.m.screen != screenPageSections || h.m.secs.dirty {
+		t.Fatalf("back on the editor: %v dirty %v", h.m.screen, h.m.secs.dirty)
+	}
+	h.press("esc")
+	if h.m.screen != screenPages {
+		t.Errorf("esc on a saved editor asked or stayed: %v", h.m.screen)
+	}
+}

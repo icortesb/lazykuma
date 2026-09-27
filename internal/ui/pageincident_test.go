@@ -130,3 +130,37 @@ func TestIncidentIgnoreALateLoad(t *testing.T) {
 		t.Fatalf("a load that came after the user left opened the form: %v", h.m.screen)
 	}
 }
+
+func TestIncidentFormStaysOpenWhenAnotherWriteLands(t *testing.T) {
+	h := onInstance(t, withPages(twoMonitors()))
+	h.fakes["home"].Handle("/api/status-page/shop-status", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"incidents":[],"publicGroupList":[]}`))
+	})
+	h.press("S", "u")
+	unpin := h.hold("y")
+	h.press("i")
+	h.typeText("Down")
+	h.run(unpin)
+	if h.m.screen != screenPageIncident || !strings.Contains(h.view(), "Down") {
+		t.Fatalf("the unpin's answer closed the incident being typed: %v\n%s", h.m.screen, h.view())
+	}
+}
+
+func TestIncidentRefusedStaysOpen(t *testing.T) {
+	h := onInstance(t, withPages(twoMonitors()))
+	h.fakes["home"].Handle("/api/status-page/shop-status", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"incidents":[],"publicGroupList":[]}`))
+	})
+	h.press("S", "i")
+	h.typeText("Refused")
+	h.press("tab")
+	h.typeText("We are on it")
+	h.press("ctrl+s")
+	if !h.fakes["home"].Called("postIncident") {
+		t.Fatal("nothing was posted")
+	}
+	v := h.view()
+	if h.m.screen != screenPageIncident || !strings.Contains(v, "Title is too long") || !strings.Contains(v, "We are on it") {
+		t.Fatalf("a refused post left the form: %v\n%s", h.m.screen, v)
+	}
+}

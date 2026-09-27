@@ -156,6 +156,14 @@ type (
 		// monitorID is the monitor a clear was for, so the detail refetches
 		// only its own history.
 		monitorID int
+		// from is the form the write was sent from, stamped by sentFrom: a
+		// write lands whatever is on screen, and only its own form may close
+		// on it. It is screenMenu, never a form, for a write sent from a
+		// list, a picker or a question, which close as they send.
+		from screen
+		// sections are what a sections save sent, for the editor to tell
+		// whether it was edited again while Kuma was saving.
+		sections []kuma.PageSection
 	}
 	loginDone struct {
 		name  string
@@ -252,22 +260,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionDone:
 		if msg.err != nil {
-			if msg.saved && (m.screen == screenMonitor || m.screen == screenRaw) {
+			if msg.saved && msg.from == m.screen && (m.screen == screenMonitor || m.screen == screenRaw) {
 				m.screen = m.backTo
 			}
 			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, kuma.Brief(msg.err)), 8*time.Second)
 		}
-		// A write lands: leave the form and let the instance's next state
-		// show the result. The pickers that write (move, delete group) close
-		// as they send, like the confirmation: a picker open now was opened
-		// since, for something else.
-		switch m.screen {
-		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag,
-			screenPageNew, screenPageDelete, screenPageSettings, screenPageIncident:
+		// A write lands: its own form closes, and the instance's next state
+		// shows the result. Any other form stays as it is: it was opened
+		// while the write was on its way, for something else, and may hold
+		// edits not saved yet.
+		switch {
+		case msg.from == screenPageSections:
+			m = m.sectionsSaved(msg.sections)
+		case msg.from != m.screen:
+		case m.screen == screenMonitor, m.screen == screenRaw, m.screen == screenChannel, m.screen == screenSilence,
+			m.screen == screenName, m.screen == screenTag, m.screen == screenPageNew, m.screen == screenPageDelete,
+			m.screen == screenPageSettings, m.screen == screenPageIncident:
 			m.screen = m.backTo
-		case screenPageSections:
-			// Its backTo is where its own forms return, the editor itself.
-			m.screen = screenPages
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
 		if m.screen == screenDetail {
