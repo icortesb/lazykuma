@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -132,6 +133,31 @@ func TestFetchPublicPageBases(t *testing.T) {
 				if got := gotQuery.Get(k); got != want {
 					t.Errorf("query %s = %q, want %q", k, got, want)
 				}
+			}
+		})
+	}
+}
+
+// TestFetchPublicPageBehindALogin checks that a proxy's login page, sent
+// in place of Kuma's JSON, is named for what it is.
+func TestFetchPublicPageBehindALogin(t *testing.T) {
+	for _, tc := range []struct{ name, contentType string }{
+		{"said to be HTML", "text/html; charset=utf-8"},
+		{"said to be nothing", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header()["Content-Type"] = []string{tc.contentType}
+				w.Write([]byte(`<!doctype html><html><body><form action="/login">Sign in</form></body></html>`))
+			}))
+			t.Cleanup(srv.Close)
+			_, err := FetchPublicPage(context.Background(), srv.URL+"/kuma?token=secret", "shop-status")
+			want := srv.URL + "/kuma/api/status-page/shop-status did not answer with Kuma's JSON — is there a login in front of it?"
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("err = %v, want it to say %q", err, want)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Errorf("the error shows the query's token: %v", err)
 			}
 		})
 	}

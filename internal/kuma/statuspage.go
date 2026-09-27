@@ -3,7 +3,9 @@ package kuma
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -313,6 +315,11 @@ func decodeIncident(raw json.RawMessage) (PageIncident, error) {
 		Pinned: bool(r.Pin), Created: r.Created, Updated: r.Updated}, nil
 }
 
+// maxPublicPage bounds what FetchPublicPage reads: a page with hundreds of
+// monitors is well under a megabyte, and an endless answer must not fill
+// the memory.
+const maxPublicPage = 16 << 20
+
 // FetchPublicPage reads a status page the way its visitors do, over plain
 // HTTP from the instance: it is the only place Kuma gives a page's
 // sections. Kuma caches this endpoint server-side for 5 minutes, keyed on
@@ -335,6 +342,11 @@ func FetchPublicPage(ctx context.Context, base, slug string) (PublicPage, error)
 		return PublicPage{}, fmt.Errorf("kuma: status page %s: %w", slug, err)
 	}
 	u = u.JoinPath("api", "status-page", slug)
+	// The address for an error to name, without what could be a secret:
+	// a password, or a proxy's token in the query.
+	shownURL := *u
+	shownURL.RawQuery = ""
+	shown := shownURL.Redacted()
 	q := u.Query()
 	q.Set("lazykuma", strconv.FormatInt(time.Now().UnixNano(), 10))
 	u.RawQuery = q.Encode()
@@ -364,7 +376,17 @@ func FetchPublicPage(ctx context.Context, base, slug string) (PublicPage, error)
 			} `json:"monitorList"`
 		} `json:"publicGroupList"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+	// A proxy that wants a login answers with its own page, often with a
+	// 200: say so, rather than what the JSON decoder makes of its HTML.
+	notKuma := fmt.Errorf("kuma: %s did not answer with Kuma's JSON — is there a login in front of it?", shown)
+	if strings.Contains(resp.Header.Get("Content-Type"), "html") {
+		return PublicPage{}, notKuma
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxPublicPage)).Decode(&r); err != nil {
+		var syntax *json.SyntaxError
+		if errors.As(err, &syntax) {
+			return PublicPage{}, notKuma
+		}
 		return PublicPage{}, fmt.Errorf("kuma: status page %s: %w", slug, err)
 	}
 	var out PublicPage
