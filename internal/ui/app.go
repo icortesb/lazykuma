@@ -43,19 +43,22 @@ const (
 	screenLogin
 	screenAdd
 	screenHelp
-	screenPick      // a type or a service, before its form
-	screenMonitor   // the curated monitor form
-	screenRaw       // the raw field editor
-	screenChannels  // the instance's notification channels
-	screenChannel   // one channel's form
-	screenSilence   // silence a monitor
-	screenSilenced  // what is silenced
-	screenIncidents // state changes
-	screenConfirm   // before something irreversible
-	screenName      // a group's name
-	screenTags      // an instance's tags
-	screenTag       // one tag's form
-	screenDetail    // one monitor at full size
+	screenPick       // a type or a service, before its form
+	screenMonitor    // the curated monitor form
+	screenRaw        // the raw field editor
+	screenChannels   // the instance's notification channels
+	screenChannel    // one channel's form
+	screenSilence    // silence a monitor
+	screenSilenced   // what is silenced
+	screenIncidents  // state changes
+	screenConfirm    // before something irreversible
+	screenName       // a group's name
+	screenTags       // an instance's tags
+	screenTag        // one tag's form
+	screenDetail     // one monitor at full size
+	screenPages      // an instance's status pages
+	screenPageNew    // a new status page's title and slug
+	screenPageDelete // a page's slug, before deleting it
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -95,6 +98,9 @@ type Model struct {
 	tags     tagsScreen
 	tform    tagForm
 	detail   detailScreen
+	pages    pagesScreen
+	pnew     newPageForm
+	pdel     slugConfirm
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -245,7 +251,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// as they send, like the confirmation: a picker open now was opened
 		// since, for something else.
 		switch m.screen {
-		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag:
+		case screenMonitor, screenRaw, screenChannel, screenSilence, screenConfirm, screenName, screenTag,
+			screenPageNew, screenPageDelete:
 			m.screen = m.backTo
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
@@ -366,6 +373,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTags(msg)
 		case screenDetail:
 			return m.updateDetail(msg)
+		case screenPages:
+			return m.updatePages(msg)
 		case screenConfirm:
 			answered, yes := m.ask.Update(msg)
 			if !answered {
@@ -403,6 +412,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateName(msg)
 	case screenTag:
 		return m.updateTagForm(msg)
+	case screenPageNew:
+		return m.updatePageForm(msg)
+	case screenPageDelete:
+		return m.updateSlugConfirm(msg)
 	}
 	return m, nil
 }
@@ -496,6 +509,8 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case instTags:
 		m.tags, m.screen = tagsScreen{}, screenTags
 		cmd = loadTags(in.inst)
+	case instPages:
+		m.pages, m.screen = pagesScreen{}, screenPages
 	case instDetail:
 		if hasRow {
 			m.detail, m.screen = newDetailScreen(row.ID, in.st), screenDetail
@@ -642,6 +657,13 @@ func (m Model) render() string {
 		return m.chrome(m.tform.View(), "")
 	case screenDetail:
 		return m.chrome(m.detail.View(m.current().st, m.width, m.height-2), keyHintsDetail)
+	case screenPages:
+		in := m.current()
+		return m.chrome(m.pages.View(in.name(), in.url(), in.st.StatusPages, m.width, m.height-2), keyHintsPages)
+	case screenPageNew:
+		return m.chrome(m.pnew.View(), "")
+	case screenPageDelete:
+		return m.chrome(m.pdel.View(), "")
 	}
 
 	names := make([]string, len(m.insts))
@@ -688,6 +710,7 @@ func helpText() string {
 	for _, sec := range []struct{ heading, hints string }{
 		{"On an instance", keyHints},
 		{"On a monitor's detail", keyHintsDetail},
+		{"On status pages", keyHintsPages},
 	} {
 		b.WriteString("\n" + styleHeading.Render(sec.heading) + "\n\n")
 		for _, part := range strings.Split(sec.hints, "   ") {

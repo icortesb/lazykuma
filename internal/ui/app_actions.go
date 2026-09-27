@@ -541,3 +541,77 @@ func (m Model) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	return m, nil
 }
+
+func (m Model) updatePages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	pages := in.st.StatusPages
+	var act pageAction
+	m.pages, act = m.pages.Update(msg, pages)
+	p, ok := m.pages.selected(pages)
+	switch act {
+	case pageBack:
+		m.screen = screenInstance
+	case pageNew:
+		m.pnew = newNewPageForm()
+		m.backTo, m.screen = screenPages, screenPageNew
+	case pageOpen:
+		if !ok {
+			break
+		}
+		// openURL starts the browser and does not wait for it, so it can
+		// run here, in the update.
+		u := kuma.PageURL(in.url(), p.Slug)
+		if err := openURL(u); err != nil {
+			return m, flashFor(fmt.Sprintf("open %s yourself: %v", u, err), 8*time.Second)
+		}
+		return m, flashFor("opened "+u, 3*time.Second)
+	case pageDelete:
+		if ok {
+			m.pdel = newSlugConfirm(p.Title, p.Slug)
+			m.backTo, m.screen = screenPages, screenPageDelete
+		}
+	}
+	return m, nil
+}
+
+func (m Model) updatePageForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pnew, act, cmd = m.pnew.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		title, slug, err := m.pnew.Values()
+		if err != nil {
+			m.pnew.err = err.Error()
+			return m, nil
+		}
+		m.pnew.err = ""
+		return m, addPage(m.current().inst, title, slug)
+	}
+	return m, cmd
+}
+
+func (m Model) updateSlugConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pdel, act, cmd = m.pdel.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		if !m.pdel.Confirmed() {
+			m.pdel.err = "type " + m.pdel.slug + " to delete it"
+			return m, nil
+		}
+		m.pdel.err = ""
+		in := m.current()
+		p, ok := in.st.StatusPage(m.pdel.slug)
+		if !ok {
+			p = kuma.StatusPage{Slug: m.pdel.slug, Title: m.pdel.title}
+		}
+		return m, deletePage(in.inst, p)
+	}
+	return m, cmd
+}

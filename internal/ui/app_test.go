@@ -167,6 +167,24 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			return map[string]any{"ok": true, "data": page}
 		case "clearEvents", "clearHeartbeats":
 			return map[string]any{"ok": true}
+		case "addStatusPage":
+			var slug string
+			json.Unmarshal(args[1], &slug)
+			return map[string]any{"ok": true, "slug": strings.ToLower(slug)}
+		case "getStatusPage":
+			var slug string
+			json.Unmarshal(args[0], &slug)
+			return map[string]any{"ok": true, "config": map[string]any{
+				"id": 7, "slug": slug, "title": "Shop status", "icon": "/icon.svg", "published": true,
+				"domainNameList": []string{}, "customCSS": "body{}",
+			}}
+		case "saveStatusPage", "deleteStatusPage", "unpinIncident":
+			return map[string]any{"ok": true}
+		case "postIncident":
+			var inc map[string]any
+			json.Unmarshal(args[1], &inc)
+			inc["id"], inc["pin"] = 3, true
+			return map[string]any{"ok": true, "incident": inc}
 		}
 		return login(event, args)
 	}
