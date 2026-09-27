@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"slices"
 	"testing"
 )
@@ -11,9 +12,12 @@ import (
 const pageConfig = `{"id":1,"slug":"shop-status","title":"Shop status","description":null,"icon":"/icon.svg","theme":"auto","autoRefreshInterval":300,"published":true,"showTags":false,"domainNameList":[],"customCSS":"body{}","footerText":null,"showPoweredBy":true,"analyticsId":null,"analyticsScriptUrl":null,"analyticsType":null,"showCertificateExpiry":false,"showOnlyLastHeartbeat":false,"rssTitle":null}`
 
 // pageFake answers the status page calls the way Kuma 2.5.3 did when probed.
-func pageFake(t *testing.T) (*fakeKuma, *Session) {
+// The returned *url.Values is the query string the fake's public-page route
+// last saw, so a test can check FetchPublicPage's cache-busting parameter.
+func pageFake(t *testing.T) (*fakeKuma, *Session, *url.Values) {
 	t.Helper()
 	login := kumaLogin(false)
+	var lastQuery url.Values
 	f := newFakeKuma(t, func(event string, args []json.RawMessage) any {
 		switch event {
 		case "addStatusPage":
@@ -39,13 +43,14 @@ func pageFake(t *testing.T) (*fakeKuma, *Session) {
 		return login(event, args)
 	})
 	f.Handle("/api/status-page/shop-status", func(w http.ResponseWriter, r *http.Request) {
+		lastQuery = r.URL.Query()
 		w.Write([]byte(`{"config":{"slug":"shop-status"},"incidents":[{"id":3,"style":"danger","title":"Down","content":"We are on it","pin":true,"active":true,"createdDate":"2026-09-27 16:13:25","lastUpdatedDate":null,"status_page_id":1}],"publicGroupList":[{"id":1,"name":"Services","weight":1,"monitorList":[{"id":1,"name":"web","sendUrl":0,"type":"http"},{"id":2,"name":"api","sendUrl":1,"type":"http","url":"https://api.example.com"}]}],"maintenanceList":[]}`))
 	})
 	s := dial(t, f)
 	if err := s.LoginByToken(context.Background(), "jwt"); err != nil {
 		t.Fatal(err)
 	}
-	return f, s
+	return f, s, &lastQuery
 }
 
 func TestSlugs(t *testing.T) {
@@ -86,7 +91,7 @@ func TestDecodeStatusPageList(t *testing.T) {
 }
 
 func TestStatusPageCalls(t *testing.T) {
-	f, s := pageFake(t)
+	f, s, lastQuery := pageFake(t)
 	ctx := context.Background()
 
 	slug, err := s.AddStatusPage(ctx, "Shop status", "shop-status")
@@ -147,6 +152,12 @@ func TestStatusPageCalls(t *testing.T) {
 	}
 	if len(pub.Incidents) != 1 || pub.Incidents[0] != (PageIncident{ID: 3, Title: "Down", Content: "We are on it", Style: "danger", Pinned: true, Created: "2026-09-27 16:13:25"}) {
 		t.Fatalf("incidents = %+v", pub.Incidents)
+	}
+	// A unique query string is Kuma's own cache-busting mechanism (apicache
+	// keys on the full request URL); FetchPublicPage relies on it to always
+	// read a fresh page rather than a cached one.
+	if lastQuery.Get("lazykuma") == "" {
+		t.Errorf("FetchPublicPage sent no cache-busting query parameter: %v", *lastQuery)
 	}
 	if _, err := FetchPublicPage(ctx, f.URL(), "missing"); err == nil {
 		t.Error("a missing page is not an error")

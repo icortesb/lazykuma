@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // StatusPage is one of Kuma's public status pages. Config is every setting
@@ -182,8 +184,10 @@ func (s *Session) GetStatusPage(ctx context.Context, slug string) (StatusPage, e
 }
 
 // SaveStatusPage replaces a page's settings and sections with these. The
-// logo is sent back as the page has it, which keeps it. Kuma flushes its
-// public-page cache (see FetchPublicPage) as part of this call.
+// logo is sent back as the page has it, which keeps it. This also flushes
+// Kuma's public-page cache, so a visitor browsing the page directly (with
+// no cache-busting query string, unlike FetchPublicPage) sees the change
+// immediately too.
 func (s *Session) SaveStatusPage(ctx context.Context, slug string, config map[string]any, sections []PageSection) error {
 	icon, _ := config["icon"].(string)
 	if icon == "" {
@@ -215,8 +219,9 @@ func (s *Session) SaveStatusPage(ctx context.Context, slug string, config map[st
 	return r.err()
 }
 
-// DeleteStatusPage removes a page, its sections and its incidents. Kuma
-// flushes its public-page cache (see FetchPublicPage) as part of this call.
+// DeleteStatusPage removes a page, its sections and its incidents. This
+// also flushes Kuma's public-page cache, so a visitor holding a stale copy
+// of the page stops seeing it.
 func (s *Session) DeleteStatusPage(ctx context.Context, slug string) error {
 	r, err := s.call(ctx, "deleteStatusPage", slug)
 	if err != nil {
@@ -226,9 +231,10 @@ func (s *Session) DeleteStatusPage(ctx context.Context, slug string) error {
 }
 
 // PostIncident pins an incident to a page, or edits the one with inc.ID.
-// Unlike SaveStatusPage and DeleteStatusPage, this does not flush Kuma's
-// public-page cache: FetchPublicPage can still return the page as it was up
-// to 5 minutes ago.
+// FetchPublicPage sees the change immediately (it bypasses Kuma's
+// public-page cache); a visitor's browser can still show Kuma's cached page
+// for up to 5 minutes, since this does not flush that cache the way
+// SaveStatusPage and DeleteStatusPage do.
 func (s *Session) PostIncident(ctx context.Context, slug string, inc PageIncident) (PageIncident, error) {
 	body := map[string]any{"title": inc.Title, "content": inc.Content, "style": inc.Style}
 	if inc.ID != 0 {
@@ -256,8 +262,9 @@ func (s *Session) PostIncident(ctx context.Context, slug string, inc PageInciden
 
 // UnpinIncident takes a page's incident down: Kuma drops it from
 // FetchPublicPage's Incidents entirely rather than keeping it there
-// unpinned. Like PostIncident, this does not flush Kuma's public-page
-// cache.
+// unpinned, and FetchPublicPage sees this immediately. Like PostIncident,
+// this does not flush Kuma's public-page cache, so a visitor's browser can
+// still show it pinned for up to 5 minutes.
 func (s *Session) UnpinIncident(ctx context.Context, slug string) error {
 	r, err := s.call(ctx, "unpinIncident", slug)
 	if err != nil {
@@ -285,12 +292,23 @@ func decodeIncident(raw json.RawMessage) (PageIncident, error) {
 
 // FetchPublicPage reads a status page the way its visitors do, over plain
 // HTTP from the instance: it is the only place Kuma gives a page's
-// sections. Kuma caches this endpoint server-side for 5 minutes; only
-// SaveStatusPage and DeleteStatusPage flush that cache, so a page fetched
-// here can lag an incident PostIncident or UnpinIncident just made.
+// sections. Kuma caches this endpoint server-side for 5 minutes, keyed on
+// the full request URL including its query string (apicache's default
+// key, which Kuma does not override for this route); FetchPublicPage adds
+// a unique one on every call to always bypass that cache, so what it
+// returns is always current, even right after PostIncident or
+// UnpinIncident, neither of which flushes the cache the way SaveStatusPage
+// and DeleteStatusPage do. A visitor's browser, with no such query string
+// of its own, can still see Kuma's cached copy for up to 5 minutes.
 func FetchPublicPage(ctx context.Context, base, slug string) (PublicPage, error) {
-	u := strings.TrimRight(strings.TrimSpace(base), "/") + "/api/status-page/" + url.PathEscape(slug)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	u, err := url.Parse(strings.TrimRight(strings.TrimSpace(base), "/") + "/api/status-page/" + url.PathEscape(slug))
+	if err != nil {
+		return PublicPage{}, fmt.Errorf("kuma: status page %s: %w", slug, err)
+	}
+	q := u.Query()
+	q.Set("lazykuma", strconv.FormatInt(time.Now().UnixNano(), 10))
+	u.RawQuery = q.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return PublicPage{}, err
 	}

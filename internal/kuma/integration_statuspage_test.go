@@ -125,8 +125,6 @@ func TestIntegrationStatusPages(t *testing.T) {
 		t.Fatalf("FetchPublicPage after rename = %+v", pub.Sections)
 	}
 
-	current := []PageSection{{ID: sectionID, Name: "Core", Monitors: []PageMonitor{{ID: monitorID}}}}
-
 	inc, err := s.PostIncident(ctx, slug, PageIncident{Title: "Down", Content: "We are on it", Style: "danger"})
 	if err != nil {
 		t.Fatalf("PostIncident: %v", err)
@@ -134,14 +132,9 @@ func TestIntegrationStatusPages(t *testing.T) {
 	if inc.ID == 0 || !inc.Pinned {
 		t.Fatalf("PostIncident = %+v", inc)
 	}
-	// Kuma 2.5.3 caches the public status-page endpoint for 5 minutes and
-	// only saveStatusPage and deleteStatusPage flush that cache; postIncident
-	// and unpinIncident do not, so a visitor's page can lag behind an
-	// incident by up to 5 minutes. Resave the page's own settings, unchanged,
-	// to flush the cache without waiting it out.
-	if err := s.SaveStatusPage(ctx, slug, page.Config, current); err != nil {
-		t.Fatalf("SaveStatusPage (flush after PostIncident): %v", err)
-	}
+	// FetchPublicPage adds its own cache-busting query string, so it sees
+	// this immediately even though PostIncident does not flush Kuma's
+	// public-page cache (only SaveStatusPage and DeleteStatusPage do).
 	pub, err = FetchPublicPage(ctx, url, slug)
 	if err != nil {
 		t.Fatalf("FetchPublicPage after PostIncident: %v", err)
@@ -158,9 +151,6 @@ func TestIntegrationStatusPages(t *testing.T) {
 
 	if err := s.UnpinIncident(ctx, slug); err != nil {
 		t.Fatalf("UnpinIncident: %v", err)
-	}
-	if err := s.SaveStatusPage(ctx, slug, page.Config, current); err != nil {
-		t.Fatalf("SaveStatusPage (flush after UnpinIncident): %v", err)
 	}
 	pub, err = FetchPublicPage(ctx, url, slug)
 	if err != nil {
