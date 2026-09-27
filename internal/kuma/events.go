@@ -316,6 +316,14 @@ func DecodeEvent(name string, args []json.RawMessage) (ev Event, ok bool, err er
 		mt, err := decodeMonitorTypes(a)
 		return mt, err == nil, err
 
+	case "statusPageList":
+		a, err := arg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		pl, err := decodeStatusPageList(a)
+		return pl, err == nil, err
+
 	case "info":
 		a, err := arg(0)
 		if err != nil {
