@@ -126,6 +126,14 @@ func (m Model) updatePick(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.screen = m.backTo
+		case "pagemon":
+			id, _ := strconv.Atoi(value)
+			m.screen = m.backTo
+			// A monitor deleted while the picker was open would be saved
+			// onto the page as an id Kuma no longer has.
+			if mon, ok := m.current().st.Monitors[id]; ok {
+				m.secs = m.secs.addMonitor(kuma.PageMonitor{ID: id, Name: mon.Name})
+			}
 		}
 	}
 	return m, nil
@@ -142,6 +150,14 @@ func (m Model) updateName(msg tea.Msg) (tea.Model, tea.Cmd) {
 		name, err := m.nform.Value()
 		if err != nil {
 			m.nform.err = err.Error()
+			return m, nil
+		}
+		switch m.nform.section {
+		case "add":
+			m.secs, m.screen = m.secs.addSection(name), m.backTo
+			return m, nil
+		case "rename":
+			m.secs, m.screen = m.secs.renameSection(name), m.backTo
 			return m, nil
 		}
 		if m.nform.id == 0 {
@@ -555,6 +571,10 @@ func (m Model) updatePages(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if ok {
 			return m, loadPage(in.inst, p.Slug)
 		}
+	case pageSections:
+		if ok {
+			return m, loadSections(in.inst, p.Slug, p.Title)
+		}
 	case pageNew:
 		m.pnew = newNewPageForm()
 		m.backTo, m.screen = screenPages, screenPageNew
@@ -637,4 +657,61 @@ func (m Model) updateSlugConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, deletePage(in.inst, p)
 	}
 	return m, cmd
+}
+
+func (m Model) updateSections(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	e := m.secs
+	r, hasRow := e.current()
+	switch {
+	case key.Matches(msg, keys.Up):
+		m.secs = e.up()
+	case key.Matches(msg, keys.Down):
+		m.secs = e.down()
+	case key.Matches(msg, keys.Back):
+		if !e.dirty {
+			m.screen = screenPages
+			return m, nil
+		}
+		m.ask = confirm{question: "Discard the changes to the sections?", detail: "none of them has been saved to Kuma"}
+		m.onYes = func() tea.Msg { return sectionsAnswered{discard: true} }
+		m.backTo, m.screen = screenPageSections, screenConfirm
+	case msg.Type == tea.KeyCtrlS:
+		return m, saveSections(m.current().inst, e.slug, e.title, e.sections)
+	case msg.String() == "a":
+		m.nform = newNameForm("New section", "a heading on the page, with monitors under it", "", 0)
+		m.nform.section = "add"
+		m.backTo, m.screen = screenPageSections, screenName
+	case msg.String() == "r" && hasRow && r.mon < 0:
+		m.nform = newNameForm("Rename section", "", e.sections[r.sec].Name, 0)
+		m.nform.section = "rename"
+		m.backTo, m.screen = screenPageSections, screenName
+	case msg.String() == "m":
+		if !hasRow {
+			return m, flashFor("add a section first (a)", 3*time.Second)
+		}
+		sec := e.sections[r.sec]
+		options := monitorOptions(m.current().st, sec)
+		if len(options) == 0 {
+			return m, flashFor("every monitor is in "+sec.Name+" already", 3*time.Second)
+		}
+		m.pick = newPicker(fmt.Sprintf("Add to %q", sec.Name), "a monitor, or a group to show as one", options)
+		m.picking, m.backTo, m.screen = "pagemon", screenPageSections, screenPick
+	case msg.String() == "d" && hasRow:
+		sec := e.sections[r.sec]
+		if r.mon >= 0 || len(sec.Monitors) == 0 {
+			m.secs = e.removeRow()
+			return m, nil
+		}
+		m.ask = confirm{
+			question: fmt.Sprintf("Remove the section %q and its %s from the page?", sec.Name, monitors(len(sec.Monitors))),
+			detail:   "the monitors stay in Kuma; nothing changes there until ctrl+s saves",
+		}
+		m.onYes = func() tea.Msg { return sectionsAnswered{} }
+		m.backTo, m.screen = screenPageSections, screenConfirm
+	case msg.String() == "K":
+		m.secs = e.moveUp()
+	case msg.String() == "J":
+		m.secs = e.moveDown()
+	}
+	return m, nil
 }

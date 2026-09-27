@@ -14,11 +14,16 @@ import (
 	"github.com/icortesb/lazykuma/internal/state"
 )
 
-// nameForm asks for one name: a new group's, or a group's new one.
+// nameForm asks for one name: a new group's, or a group's new one; or the
+// same for a section of a status page.
 type nameForm struct {
 	form
 	title, intro string
 	id           int // the group renamed; 0 for a new one
+	// section is "add" or "rename" when the name is a page section's, which
+	// the sections editor takes, and empty when it is a group's, which is
+	// written to Kuma.
+	section string
 }
 
 func newNameForm(title, intro, value string, id int) nameForm {
