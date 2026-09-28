@@ -31,13 +31,8 @@ func Acquire(path string) (*Lock, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	f, held, err := openLocked(path, true)
 	if err != nil {
-		return nil, err
-	}
-	held, err := tryLock(f)
-	if err != nil {
-		f.Close()
 		return nil, err
 	}
 	if !held {
@@ -73,7 +68,7 @@ func (l *Lock) Release() error {
 // never takes the lock for longer than the probe: it tries to lock; on
 // success it unlocks and reports (0, false); on contention it reads the PID.
 func Holder(path string) (pid int, running bool, err error) {
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, held, err := openLocked(path, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, false, nil
 	}
@@ -81,14 +76,56 @@ func Holder(path string) (pid int, running bool, err error) {
 		return 0, false, err
 	}
 	defer f.Close()
-	held, err := tryLock(f)
-	if err != nil {
-		return 0, false, err
-	}
 	if held {
 		return 0, false, unlock(f)
 	}
 	return readPID(f), true, nil
+}
+
+// afterOpen is a test seam: it runs between opening the file and locking it,
+// the window in which a releasing holder can unlink the file.
+var afterOpen = func() {}
+
+// openLocked opens path and tries to lock it. A lock taken on a file that was
+// unlinked meanwhile (Release removes the file) guards nothing: a third
+// process would create a new file at path and lock that too. So a successful
+// lock only counts when the open file is still the one at path; otherwise it
+// starts over. On contention it returns the open, unlocked file so the caller
+// can read the holder's PID.
+func openLocked(path string, create bool) (*os.File, bool, error) {
+	flag := os.O_RDWR
+	if create {
+		flag |= os.O_CREATE
+	}
+	for {
+		f, err := os.OpenFile(path, flag, 0o644)
+		if err != nil {
+			return nil, false, err
+		}
+		afterOpen()
+		held, err := tryLock(f)
+		if err != nil {
+			f.Close()
+			return nil, false, err
+		}
+		if !held {
+			return f, false, nil
+		}
+		if sameFile(f, path) {
+			return f, true, nil
+		}
+		unlock(f)
+		f.Close()
+	}
+}
+
+func sameFile(f *os.File, path string) bool {
+	a, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	b, err := os.Stat(path)
+	return err == nil && os.SameFile(a, b)
 }
 
 // readPID returns 0 when the holder has locked the file but not yet written

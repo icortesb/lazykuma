@@ -76,7 +76,7 @@ func TestAppendsToAnExistingFile(t *testing.T) {
 	}
 }
 
-func TestConcurrentWritersLoseNothingWithinTheCap(t *testing.T) {
+func TestConcurrentWritersKeepWholeLinesAndTheCap(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "watch.log")
 	w, err := Open(path, 64)
 	if err != nil {
@@ -100,5 +100,27 @@ func TestConcurrentWritersLoseNothingWithinTheCap(t *testing.T) {
 		if len(got) > 64 || strings.Trim(got, "line\n") != "" || len(got)%5 != 0 {
 			t.Fatalf("%s = %q", filepath.Base(p), got)
 		}
+	}
+}
+
+func TestAFailedRotationDropsNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watch.log")
+	// A non-empty directory at path.1 makes the rename fail on every OS.
+	if err := os.MkdirAll(filepath.Join(path+".1", "keep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w, err := Open(path, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{"aaaa", "bbbb", "cccc"} {
+		if n, err := w.Write([]byte(s)); err != nil || n != 4 {
+			t.Fatalf("Write(%q) = %d, %v", s, n, err)
+		}
+	}
+	w.Close()
+	if got := read(t, path); got != "aaaabbbbcccc" {
+		t.Fatalf("log = %q, want every write kept", got)
 	}
 }

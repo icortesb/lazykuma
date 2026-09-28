@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -144,5 +145,40 @@ func TestALockDiesWithItsProcess(t *testing.T) {
 			t.Fatalf("lock not freed after the child exited: %v", err)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A process that opened the file just before its holder released it locks an
+// unlinked file. That lock must not count: a second Acquire must still be
+// refused once the first has succeeded on the file at path.
+func TestALockOnAnUnlinkedFileDoesNotCount(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot remove a file another handle has open")
+	}
+	path := lockPath(t)
+	old, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	once := false
+	afterOpen = func() {
+		if !once {
+			once = true
+			old.Release()
+		}
+	}
+	defer func() { afterOpen = func() {} }()
+
+	l, err := Acquire(path)
+	afterOpen = func() {}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	if _, err := Acquire(path); !errors.As(err, new(ErrRunning)) {
+		t.Fatalf("second Acquire = %v, want ErrRunning", err)
+	}
+	if pid, running, err := Holder(path); err != nil || !running || pid != os.Getpid() {
+		t.Fatalf("Holder = %d, %v, %v", pid, running, err)
 	}
 }
