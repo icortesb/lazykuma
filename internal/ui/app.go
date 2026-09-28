@@ -923,6 +923,6 @@ func helpText() string {
 		b.WriteString("  " + styleValue.Render(line) + "\n")
 	}
 	b.WriteString("\n" + styleHeading.Render("Background alerts") + "\n\n")
-	b.WriteString("  " + styleValue.Render("Keep them coming with lazykuma closed: the menu switch, or `lazykuma autostart`.") + "\n")
+	b.WriteString("  " + styleValue.Render("Keep them coming with lazykuma closed: the menu switch, or lazykuma autostart.") + "\n")
 	return b.String()
 }

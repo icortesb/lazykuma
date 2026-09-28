@@ -26,6 +26,8 @@ type bgAlerts struct {
 	err  error // the last status read failed
 	busy bool  // a status read or a toggle is on its way: enter does nothing
 	seen bool  // st holds an answer
+	// turning is "on" or "off" while a toggle is on its way, "" otherwise.
+	turning string
 }
 
 // Messages of the background alerts commands.
@@ -73,6 +75,9 @@ func (b bgAlerts) item() menuItem {
 	case b.busy:
 		it.label = "Background alerts: …"
 		it.desc = "Checking…"
+		if b.turning != "" {
+			it.desc = "Turning " + b.turning + "…"
+		}
 	case !b.seen:
 		it.label = "Background alerts: ?"
 		it.desc = "Could not tell whether they run · enter tries to keep them running at login"
@@ -91,12 +96,15 @@ func (m Model) toggleBgAlerts() (tea.Model, tea.Cmd) {
 	if m.deps.Autostart == nil || m.bg.busy {
 		return m, nil
 	}
-	m.bg.busy = true
+	m.bg.busy, m.bg.turning = true, "on"
+	if m.bg.st.On {
+		m.bg.turning = "off"
+	}
 	return m, toggleBg(m.deps.Autostart, !m.bg.st.On)
 }
 
 func (m Model) bgStatusRead(msg bgStatus) (tea.Model, tea.Cmd) {
-	m.bg.busy = false
+	m.bg.busy, m.bg.turning = false, ""
 	m.bg.st, m.bg.err, m.bg.seen = msg.st, msg.err, msg.err == nil
 	if msg.err != nil {
 		return m, flashFor("background alerts: "+kuma.Brief(msg.err), 8*time.Second)
@@ -105,7 +113,7 @@ func (m Model) bgStatusRead(msg bgStatus) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) bgToggled(msg bgToggled) (tea.Model, tea.Cmd) {
-	m.bg.busy = false
+	m.bg.busy, m.bg.turning = false, ""
 	m.bg.st, m.bg.err, m.bg.seen = msg.st, msg.stErr, msg.stErr == nil
 	switch {
 	case msg.err != nil:

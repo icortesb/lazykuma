@@ -122,6 +122,9 @@ func TestBgAlertsDoubleEnterRunsOnce(t *testing.T) {
 	selectBg(h)
 
 	cmd := h.hold("enter")
+	if v := h.view(); !strings.Contains(v, "Turning on…") {
+		t.Errorf("the switch does not say it is turning on:\n%s", v)
+	}
 	h.press("enter") // the first is still on its way
 	if f.enables != 0 || f.disables != 0 {
 		t.Fatalf("second enter ran a toggle: enables=%d disables=%d", f.enables, f.disables)
@@ -143,5 +146,19 @@ func TestBgAlertsErrorGoesToFlash(t *testing.T) {
 		if !strings.Contains(v, want) {
 			t.Errorf("missing %q:\n%s", want, v)
 		}
+	}
+}
+
+func TestBgAlertsSaysWhichWayItIsTurning(t *testing.T) {
+	h := newHarness(t, nil)
+	withAutostart(h, &fakeAutostart{st: autostart.Status{On: true}})
+	selectBg(h)
+	cmd := h.hold("enter")
+	if v := h.view(); !strings.Contains(v, "Turning off…") {
+		t.Errorf("the switch does not say it is turning off:\n%s", v)
+	}
+	h.run(cmd)
+	if v := h.view(); strings.Contains(v, "Turning") {
+		t.Errorf("still turning after the answer:\n%s", v)
 	}
 }
