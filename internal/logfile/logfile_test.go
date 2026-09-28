@@ -3,6 +3,7 @@ package logfile
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -122,5 +123,48 @@ func TestAFailedRotationDropsNothing(t *testing.T) {
 	w.Close()
 	if got := read(t, path); got != "aaaabbbbcccc" {
 		t.Fatalf("log = %q, want every write kept", got)
+	}
+}
+
+func TestAFailedReopenIsRetriedOnTheNextWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "watch.log")
+	w, err := Open(path, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	w.Write([]byte("aaaa"))
+
+	defer func(orig func(string, int, os.FileMode) (*os.File, error)) { openFile = orig }(openFile)
+	openFile = func(string, int, os.FileMode) (*os.File, error) { return nil, os.ErrPermission }
+	if _, err := w.Write([]byte("bbbb")); err == nil {
+		t.Fatal("Write succeeded with the reopen failing")
+	}
+
+	openFile = os.OpenFile
+	if n, err := w.Write([]byte("cccc")); err != nil || n != 4 {
+		t.Fatalf("Write after the failure = %d, %v, want the file reopened", n, err)
+	}
+	if got := read(t, path); got != "cccc" {
+		t.Fatalf("log = %q", got)
+	}
+}
+
+func TestTheLogIsReadableByItsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no permission bits")
+	}
+	path := filepath.Join(t.TempDir(), "watch.log")
+	w, err := Open(path, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := st.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("mode = %o, want 600", mode)
 	}
 }
