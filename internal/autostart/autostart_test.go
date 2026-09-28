@@ -605,7 +605,8 @@ func TestWindowsEnableReplacesTheRunningWatch(t *testing.T) {
 		t.Fatalf("Run value = %q", got)
 	}
 	e.wantEvents("stop", "start")
-	if !slices.Equal(e.starts[0], []string{"conhost.exe", "--headless", e.m.Exe, "watch", "--log"}) {
+	// Not through conhost, unlike the Run value: see winRun.enable.
+	if !slices.Equal(e.starts[0], []string{e.m.Exe, "watch", "--log"}) {
 		t.Fatalf("starts = %q", e.starts)
 	}
 	st, err := e.m.Status()

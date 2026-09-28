@@ -54,7 +54,10 @@ func (w winRun) registered() (bool, string, error) {
 }
 
 // enable starts the watch now as well: the Run value only takes effect at
-// the next login.
+// the next login. It starts the binary itself, not the Run value's conhost
+// --headless: exec always hands the child standard handles, and a headless
+// conhost given them exits at once. Started directly with CREATE_NO_WINDOW
+// (startDetached), the watch gets no window either.
 func (w winRun) enable() error {
 	r, err := w.registry()
 	if err != nil {
@@ -66,7 +69,7 @@ func (w winRun) enable() error {
 	if err := w.m.stopHolder(); err != nil {
 		return err
 	}
-	return w.m.startWatch([]string{"conhost.exe", "--headless", w.m.Exe, "watch", "--log"})
+	return w.m.startWatch([]string{w.m.Exe, "watch", "--log"})
 }
 
 func (w winRun) disable() error {
