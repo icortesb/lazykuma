@@ -122,7 +122,7 @@ func TestDecodeInfo(t *testing.T) {
 }
 
 func TestDecodeIgnoresUnusedEvents(t *testing.T) {
-	ev, ok, err := DecodeEvent("proxyList", []json.RawMessage{json.RawMessage(`[]`)})
+	ev, ok, err := DecodeEvent("autoLogin", []json.RawMessage{json.RawMessage(`{}`)})
 	if ev != nil || ok || err != nil {
 		t.Fatalf("got %v %v %v, want nothing", ev, ok, err)
 	}

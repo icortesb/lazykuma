@@ -606,3 +606,105 @@ func (i *Instance) DeleteMaintenance(ctx context.Context, id int) error {
 
 // kumaTime is how Kuma writes the ends of a maintenance window.
 func kumaTime(t time.Time) string { return t.Format("2006-01-02 15:04:05") }
+
+// AddAPIKey makes a key and returns its secret, which Kuma never shows
+// again, and its id.
+func (i *Instance) AddAPIKey(ctx context.Context, name, expires string) (string, int, error) {
+	s, err := i.session()
+	if err != nil {
+		return "", 0, err
+	}
+	return s.AddAPIKey(ctx, name, expires)
+}
+
+// SetAPIKeyActive enables or disables a key.
+func (i *Instance) SetAPIKeyActive(ctx context.Context, id int, active bool) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.SetAPIKeyActive(ctx, id, active)
+}
+
+// DeleteAPIKey removes a key; anything using it stops working.
+func (i *Instance) DeleteAPIKey(ctx context.Context, id int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteAPIKey(ctx, id)
+}
+
+// SaveProxy creates a proxy, or edits the one with p.ID, and returns its id.
+func (i *Instance) SaveProxy(ctx context.Context, p kuma.Proxy, applyExisting bool) (int, error) {
+	s, err := i.session()
+	if err != nil {
+		return 0, err
+	}
+	return s.SaveProxy(ctx, p, applyExisting)
+}
+
+// DeleteProxy removes a proxy; monitors using it go without one.
+func (i *Instance) DeleteProxy(ctx context.Context, id int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteProxy(ctx, id)
+}
+
+// SaveDockerHost creates a Docker host, or edits the one with h.ID.
+func (i *Instance) SaveDockerHost(ctx context.Context, h kuma.DockerHost) (int, error) {
+	s, err := i.session()
+	if err != nil {
+		return 0, err
+	}
+	return s.SaveDockerHost(ctx, h)
+}
+
+// TestDockerHost asks Kuma to reach a daemon, saved or not, and returns what
+// it said.
+func (i *Instance) TestDockerHost(ctx context.Context, h kuma.DockerHost) (string, error) {
+	s, err := i.session()
+	if err != nil {
+		return "", err
+	}
+	return s.TestDockerHost(ctx, h)
+}
+
+// DeleteDockerHost removes a Docker host; monitors on it lose it.
+func (i *Instance) DeleteDockerHost(ctx context.Context, id int) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.DeleteDockerHost(ctx, id)
+}
+
+// DatabaseSize is Kuma's SQLite file size in bytes; 0 on MariaDB.
+func (i *Instance) DatabaseSize(ctx context.Context) (int64, error) {
+	s, err := i.session()
+	if err != nil {
+		return 0, err
+	}
+	return s.DatabaseSize(ctx)
+}
+
+// ShrinkDatabase compacts Kuma's SQLite file; on MariaDB it does nothing.
+func (i *Instance) ShrinkDatabase(ctx context.Context) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.ShrinkDatabase(ctx)
+}
+
+// ClearStatistics deletes every monitor's uptime statistics. There is no
+// undo.
+func (i *Instance) ClearStatistics(ctx context.Context) error {
+	s, err := i.session()
+	if err != nil {
+		return err
+	}
+	return s.ClearStatistics(ctx)
+}

@@ -84,6 +84,14 @@ Logos and custom CSS are set in Kuma's web UI.
 
 Kuma gives a page's sections and incident only on the page itself, so `e`, `s` and `i` read them over plain HTTP from `<instance URL>/api/status-page/<slug>`. If a proxy asks for a login there, they say so and save nothing.
 
+### Server
+
+`A` opens the instance's server screen; `tab` and `shift+tab` move between its tabs, and `1`–`4` jump to one. The footer shows the keys of the open tab; `?` lists them all.
+- **API keys** for Kuma's metrics endpoint (Prometheus, Grafana): `n` makes one and shows it once — copy it then, lazykuma does not keep it; `space` enables or disables one; `d` deletes one.
+- **Proxies** monitors can check through: add, edit, delete, and set one as the default or on every monitor at once. Passwords are never shown.
+- **Docker hosts** for docker monitors: add, edit, `t` to test that Kuma reaches the daemon, delete. A docker monitor's `docker_host` field, in the field editor, takes a host's id.
+- **Database**: its size, `s` to shrink it (SQLite; on MariaDB there is nothing to shrink), and `X` to clear every monitor's statistics after typing the instance's name. What lazykuma already shows stays on screen; the charts fill again as monitors check.
+
 ### Keys on an instance
 
 | Key | |
@@ -105,6 +113,7 @@ Kuma gives a page's sections and incident only on the page itself, so `e`, `s` a
 | `c` | the instance's notification channels |
 | `i` | the incident timeline |
 | `S` | the instance's status pages |
+| `A` | the instance's server: API keys, proxies, Docker hosts, database |
 | `/` | search names, targets and tags |
 | `f` | show only down, up, paused or maintenance monitors |
 | `s` | sort by status, name, ping or uptime |

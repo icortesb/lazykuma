@@ -690,14 +690,14 @@ func (m Model) updateSlugConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = m.backTo
 	case formSubmit:
 		if !m.pdel.Confirmed() {
-			m.pdel.err = "type " + m.pdel.slug + " to delete it"
+			m.pdel.err = "type " + m.pdel.word + " to delete it"
 			return m, nil
 		}
 		m.pdel.err = ""
 		in := m.current()
-		p, ok := in.st.StatusPage(m.pdel.slug)
+		p, ok := in.st.StatusPage(m.pdel.word)
 		if !ok {
-			p = kuma.StatusPage{Slug: m.pdel.slug, Title: m.pdel.title}
+			p = kuma.StatusPage{Slug: m.pdel.word, Title: m.pdel.title}
 		}
 		return m, sentFrom(screenPageDelete, deletePage(in.inst, p))
 	}
@@ -759,4 +759,247 @@ func (m Model) updateSections(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.secs = e.moveDown()
 	}
 	return m, nil
+}
+
+func (m Model) updateServer(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	in := m.current()
+	if key.Matches(msg, keys.Help) {
+		m.back, m.screen = screenServer, screenHelp
+		return m, nil
+	}
+	var act serverAction
+	m.srv, act = m.srv.Update(msg, in.st)
+	switch act {
+	case srvBack:
+		m.screen = screenInstance
+	case srvRefresh:
+		m.srv.dbKnown, m.srv.dbErr = false, ""
+		return m, loadDBSize(in.inst)
+	case srvNew:
+		switch m.srv.tab {
+		case tabKeys:
+			m.akform = newAPIKeyForm()
+			m.backTo, m.screen = screenServer, screenAPIKey
+		case tabProxies:
+			m.pform, m.screen = newProxyForm(kuma.Proxy{}), screenProxy
+		case tabDocker:
+			m.dform, m.screen = newDockerForm(kuma.DockerHost{}), screenDockerHost
+		}
+	case srvEdit:
+		if p, ok := m.srv.selectedProxy(in.st); ok && m.srv.tab == tabProxies {
+			m.pform, m.screen = newProxyForm(p), screenProxy
+		}
+		if d, ok := m.srv.selectedDocker(in.st); ok && m.srv.tab == tabDocker {
+			m.dform, m.screen = newDockerForm(d), screenDockerHost
+		}
+	case srvTest:
+		if d, ok := m.srv.selectedDocker(in.st); ok {
+			return m.testDockerHost(d, d.ID)
+		}
+	case srvToggle:
+		if k, ok := m.srv.selectedKey(in.st); ok {
+			return m, setAPIKeyActive(in.inst, k, !k.Active)
+		}
+	case srvDelete:
+		if k, ok := m.srv.selectedKey(in.st); ok && m.srv.tab == tabKeys {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the API key %q?", k.Name),
+				detail:   "anything using it stops working",
+			}
+			m.onYes, m.backTo, m.screen = deleteAPIKey(in.inst, k), screenServer, screenConfirm
+		}
+		if p, ok := m.srv.selectedProxy(in.st); ok && m.srv.tab == tabProxies {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the proxy %s?", proxyAddr(p)),
+				detail:   "monitors using it go without a proxy",
+			}
+			m.onYes, m.backTo, m.screen = deleteProxy(in.inst, p), screenServer, screenConfirm
+		}
+		if d, ok := m.srv.selectedDocker(in.st); ok && m.srv.tab == tabDocker {
+			m.ask = confirm{
+				question: fmt.Sprintf("Delete the Docker host %q?", d.Name),
+				detail:   "docker monitors on it lose their host",
+			}
+			m.onYes, m.backTo, m.screen = deleteDockerHost(in.inst, d), screenServer, screenConfirm
+		}
+	case srvShrink:
+		if m.srv.dbKnown && m.srv.dbSize == 0 {
+			// Kuma reports no size on MariaDB, where its shrink is a no-op:
+			// asking would promise something it does not do.
+			return m, flashFor("Kuma's database is MariaDB: there is nothing to shrink", 5*time.Second)
+		}
+		m.ask = confirm{
+			question: "Shrink the database?",
+			detail:   "Kuma compacts its SQLite file; it can take a while on a large one",
+		}
+		m.onYes, m.backTo, m.screen = shrinkDatabase(in.inst), screenServer, screenConfirm
+	case srvClear:
+		m.sconf = newTypedConfirm("name  ", in.name(), "",
+			fmt.Sprintf("Clear all statistics of %s?", in.name()),
+			fmt.Sprintf("Kuma deletes the uptime history of every monitor. Type %s to confirm.", in.name()))
+		m.backTo, m.screen = screenServer, screenServerConfirm
+	}
+	return m, nil
+}
+
+func (m Model) updateAPIKeyForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.akform, act, cmd = m.akform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		name, expires, err := m.akform.Values()
+		if err != nil {
+			m.akform.err = err.Error()
+			return m, nil
+		}
+		m.akform.err, m.akform.pending = "", true
+		return m, addAPIKey(m.current().inst, name, expires)
+	}
+	return m, cmd
+}
+
+// apiKeyMade shows a new key's secret, on the form that asked for it or on
+// the server screen it returns to. The secret is never flashed: a key made
+// while another screen is up is only said to exist, by its id, since Kuma
+// will not show it again.
+func (m Model) apiKeyMade(msg apiKeyMade) (tea.Model, tea.Cmd) {
+	if msg.instance != m.current().name() {
+		// The user moved to another instance while Kuma made the key: its
+		// screen is not the place for the secret, but the key exists and
+		// must not go unmentioned.
+		if msg.err != nil {
+			return m, flashFor(fmt.Sprintf("API key %q on %s: %s", msg.name, msg.instance, kuma.Brief(msg.err)), 8*time.Second)
+		}
+		return m, flashFor(fmt.Sprintf("API key %q (id %d) on %s was made after its form closed: its secret can't be shown again; delete it (id %d) and make another if you need it",
+			msg.name, msg.id, msg.instance, msg.id), 8*time.Second)
+	}
+	if m.screen == screenAPIKey {
+		m.akform.pending = false
+		if msg.err != nil {
+			m.akform.err = kuma.Brief(msg.err)
+			return m, nil
+		}
+	}
+	if msg.err != nil {
+		return m, flashFor(fmt.Sprintf("API key %q: %s", msg.name, kuma.Brief(msg.err)), 8*time.Second)
+	}
+	if m.screen != screenAPIKey && m.screen != screenServer {
+		return m, flashFor(fmt.Sprintf("API key %q (id %d) was made after its form closed: its secret can't be shown again; delete it (id %d) and make another if you need it",
+			msg.name, msg.id, msg.id), 8*time.Second)
+	}
+	m.akshown, m.screen = apiKeyShown{name: msg.name, key: msg.key, id: msg.id}, screenAPIKeyShown
+	return m, nil
+}
+
+func (m Model) updateAPIKeyShown(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if key.Matches(msg, keys.Back) || msg.Type == tea.KeyEnter {
+		m.akshown, m.screen = apiKeyShown{}, screenServer
+	}
+	return m, nil
+}
+
+func (m Model) updateServerConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.sconf, act, cmd = m.sconf.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = m.backTo
+	case formSubmit:
+		if !m.sconf.Confirmed() {
+			m.sconf.err = "type " + m.sconf.word + " to clear them"
+			return m, nil
+		}
+		m.sconf.err = ""
+		return m, sentFrom(screenServerConfirm, clearStatistics(m.current().inst))
+	}
+	return m, cmd
+}
+
+// updateProxyForm saves the proxy on enter, once, asking first when it is
+// to be set on every monitor; the question's yes marks the form as saving.
+// The form returns to the server screen, not to backTo, which the question
+// borrows to come back to the form.
+func (m Model) updateProxyForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.pform, act, cmd = m.pform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = screenServer
+	case formSubmit:
+		p, apply, err := m.pform.Values()
+		if err != nil {
+			m.pform.err = err.Error()
+			return m, nil
+		}
+		m.pform.err = ""
+		save := sentFrom(screenProxy, saveProxy(m.current().inst, p, apply))
+		if !apply {
+			m.pform.pending = true
+			return m, save
+		}
+		m.ask = confirm{
+			question: "Set this proxy on every monitor?",
+			detail:   "every monitor will check through it",
+		}
+		m.onYes, m.backTo, m.screen = save, screenProxy, screenConfirm
+	}
+	return m, cmd
+}
+
+// updateDockerForm saves the Docker host on enter, once, and tests the
+// form's values on t without saving them.
+func (m Model) updateDockerForm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var act formAction
+	var cmd tea.Cmd
+	m.dform, act, cmd = m.dform.Update(msg)
+	switch act {
+	case formCancel:
+		m.screen = screenServer
+	case formSubmit, formTest:
+		h, err := m.dform.Values()
+		if err != nil {
+			m.dform.err = err.Error()
+			return m, nil
+		}
+		m.dform.err = ""
+		if act == formTest {
+			return m.testDockerHost(h, 0)
+		}
+		m.dform.pending = true
+		return m, sentFrom(screenDockerHost, saveDockerHost(m.current().inst, h))
+	}
+	return m, cmd
+}
+
+// testDockerHost asks Kuma to reach a host, from the list (listID is its
+// id) or from the form (0). One test runs at a time: Kuma can take six
+// seconds to give up, and a second t meanwhile would only ask again.
+func (m Model) testDockerHost(h kuma.DockerHost, listID int) (tea.Model, tea.Cmd) {
+	if m.dtest.running() {
+		return m, flashFor("still testing Docker "+m.dtest.name, 3*time.Second)
+	}
+	in := m.current()
+	m.dtest = dockerTest{instance: in.name(), name: h.Name, listID: listID}
+	if listID == 0 {
+		m.dform.testing = true
+	}
+	return m, testDocker(in.inst, h)
+}
+
+// dockerTested shows Kuma's answer to the test on its way, and drops any
+// other: only the test it is for may clear what says it is running.
+func (m Model) dockerTested(msg dockerTested) (tea.Model, tea.Cmd) {
+	if !m.dtest.running() || msg.instance != m.dtest.instance || msg.name != m.dtest.name {
+		return m, nil
+	}
+	if m.dtest.listID == 0 {
+		m.dform.testing = false
+	}
+	m.dtest = dockerTest{}
+	return m, msg.flash()
 }

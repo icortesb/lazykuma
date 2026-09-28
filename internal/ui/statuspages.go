@@ -191,35 +191,43 @@ func (p newPageForm) View() string {
 	return p.view("New status page", "the slug is its address, /status/<slug>")
 }
 
-// slugConfirm asks for a page's slug before deleting it: Kuma takes its
-// sections and incidents with it, and nothing brings them back, so a y
-// is too easy to press.
-type slugConfirm struct {
+// typedConfirm asks for a word before something that nothing brings back,
+// where a y is too easy to press: a page's slug before deleting it, with
+// its sections and incidents, or an instance's name before clearing its
+// statistics.
+type typedConfirm struct {
 	form
-	slug  string
-	title string
+	word     string // what must be typed
+	title    string // what it is about, for the action to name
+	question string
+	intro    string
 }
 
-func newSlugConfirm(title, slug string) slugConfirm {
-	f := form{fields: []textinputModel{newField("slug  ", "")}, shown: 1}
+func newTypedConfirm(prompt, word, title, question, intro string) typedConfirm {
+	f := form{fields: []textinputModel{newField(prompt, "")}, shown: 1}
 	f, _ = f.focusOn(0)
-	return slugConfirm{form: f, slug: slug, title: title}
+	return typedConfirm{form: f, word: word, title: title, question: question, intro: intro}
 }
 
-func (c slugConfirm) Update(msg tea.Msg) (slugConfirm, formAction, tea.Cmd) {
+// newSlugConfirm asks for a page's slug before deleting it.
+func newSlugConfirm(title, slug string) typedConfirm {
+	return newTypedConfirm("slug  ", slug, title, fmt.Sprintf("Delete the status page %q?", title),
+		"Kuma deletes it with its sections and incidents. Type "+slug+" to confirm.")
+}
+
+func (c typedConfirm) Update(msg tea.Msg) (typedConfirm, formAction, tea.Cmd) {
 	f, act, cmd := c.form.update(msg)
 	c.form = f
 	return c, act, cmd
 }
 
-// Confirmed is whether the slug typed is the page's.
-func (c slugConfirm) Confirmed() bool {
-	return strings.TrimSpace(c.fields[0].Value()) == c.slug
+// Confirmed is whether the word typed is the one asked for.
+func (c typedConfirm) Confirmed() bool {
+	return strings.TrimSpace(c.fields[0].Value()) == c.word
 }
 
-func (c slugConfirm) View() string {
-	return c.view(fmt.Sprintf("Delete the status page %q?", c.title),
-		"Kuma deletes it with its sections and incidents. Type "+c.slug+" to confirm.")
+func (c typedConfirm) View() string {
+	return c.view(c.question, c.intro)
 }
 
 func addPage(in *core.Instance, title, slug string) tea.Cmd {

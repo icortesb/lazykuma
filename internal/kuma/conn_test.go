@@ -43,7 +43,7 @@ func TestSessionReceivesEvents(t *testing.T) {
 	f := newFakeKuma(t, nil)
 	s := dial(t, f)
 
-	f.Push(`42["proxyList",[]]`) // not used by the TUI: dropped
+	f.Push(`42["autoLogin",{}]`) // not used by the TUI: dropped
 	f.Push(`42["heartbeat",{"monitorID":3,"status":1,"time":"2026-09-11 00:12:49.103","msg":"200 - OK","ping":5,"important":false}]`)
 
 	for {

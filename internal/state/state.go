@@ -142,6 +142,15 @@ type Instance struct {
 	// insensitive) then slug. Kuma sends the list once at login; a write
 	// keeps it current with a synthetic event of its own.
 	StatusPages []kuma.StatusPage
+	// APIKeys are its API keys. Kuma pushes the list at login and again
+	// after every write to a key.
+	APIKeys []kuma.APIKey
+	// Proxies are its proxies. Kuma pushes the list at login and again
+	// after every write to a proxy.
+	Proxies []kuma.Proxy
+	// DockerHosts are its Docker hosts. Kuma pushes the list at login and
+	// again after every write to a host.
+	DockerHosts []kuma.DockerHost
 }
 
 // RecentIncidents is the newest n state changes, newest first.
@@ -261,6 +270,12 @@ func Apply(in Instance, ev kuma.Event, now time.Time) Instance {
 		in.StatusPages = sortPages(append(pages, ev.Page))
 	case kuma.StatusPageDeleted:
 		in.StatusPages = slices.DeleteFunc(slices.Clone(in.StatusPages), func(p kuma.StatusPage) bool { return p.Slug == ev.Slug })
+	case kuma.APIKeyList:
+		in.APIKeys = ev.Keys
+	case kuma.ProxyList:
+		in.Proxies = ev.Proxies
+	case kuma.DockerHostList:
+		in.DockerHosts = ev.Hosts
 	}
 	return in
 }
