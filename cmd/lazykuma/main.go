@@ -170,24 +170,28 @@ func watch(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return fail(stderr, err)
 	}
-	// The lock and the log live next to tokens.json, where autostart looks.
-	state := filepath.Dir(tokPath)
+	lockPath, logPath, err := autostart.StatePaths()
+	if err != nil {
+		return fail(stderr, err)
+	}
 
 	// Under the Run key or XDG autostart nobody sees stderr, so with --log
-	// every message goes to the file as well, startup errors included.
+	// every message goes to the file as well, startup errors included. The
+	// log comes first so a broken stderr cannot keep lines out of it.
+	// Errors before the log is open (paths, opening it) can only reach stderr.
 	out, msgs := stdout, stderr
 	if *toLog {
-		l, err := logfile.Open(filepath.Join(state, "watch.log"), 1<<20)
+		l, err := logfile.Open(logPath, 1<<20)
 		if err != nil {
 			return fail(stderr, err)
 		}
 		defer l.Close()
-		out, msgs = l, io.MultiWriter(stderr, l)
+		out, msgs = l, &logMsgs{log: l, stderr: stderr}
 	}
 
 	// A status probe holds the lock for an instant; waiting a second keeps
 	// it from making a starting watch give up.
-	lock, err := watchlock.AcquireWait(filepath.Join(state, "watch.lock"), time.Second)
+	lock, err := watchlock.AcquireWait(lockPath, time.Second)
 	if err != nil {
 		return fail(msgs, err)
 	}
@@ -201,9 +205,23 @@ func watch(args []string, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	desktop := notify.Async(notify.Desktop{}, func(err error) {
-		fmt.Fprintln(out, "lazykuma: desktop notification:", err)
+		fmt.Fprintln(msgs, "lazykuma: desktop notification:", err)
 	})
 	return fail(msgs, commands.Watch(ctx, src, desktop, out, time.Now))
+}
+
+// logMsgs sends a message to the watch log, stamped like the lines Watch
+// writes there, and to stderr. The log goes first and a stderr that fails
+// (no console under the Run key) is ignored: the log is the record.
+type logMsgs struct{ log, stderr io.Writer }
+
+func (m *logMsgs) Write(p []byte) (int, error) {
+	stamp := time.Now().Local().Format("2006-01-02 15:04:05")
+	if _, err := fmt.Fprintf(m.log, "%s  %s", stamp, p); err != nil {
+		return 0, err
+	}
+	_, _ = m.stderr.Write(p)
+	return len(p), nil
 }
 
 // autostartCmd shows, enables or disables the watch at login.
@@ -305,18 +323,15 @@ func resolve(p string) string {
 }
 
 // warnBinary tells a status caller that the background watch is another
-// binary. Autostart's own errors are ignored: status must stay fast and
-// never fail because of them.
-func warnBinary(stderr io.Writer) {
-	m, err := autostart.Default()
-	if err != nil {
+// binary. It only reads the registration, no command and no lock probe, so
+// a status bar polling every few seconds pays nothing; its errors are
+// ignored because status must never fail because of autostart.
+func warnBinary(stderr io.Writer, m *autostart.Manager) {
+	on, path, err := m.Registered()
+	if err != nil || !on {
 		return
 	}
-	st, err := m.Status()
-	if err != nil || !st.On {
-		return
-	}
-	if w := binaryWarning(st.Path, m.Exe); w != "" {
+	if w := binaryWarning(path, m.Exe); w != "" {
 		fmt.Fprintln(stderr, w)
 	}
 }
@@ -363,6 +378,8 @@ func status(args []string, stdout, stderr io.Writer) int {
 		return commands.Failed(*asJSON, err, stdout)
 	}
 	warn(stderr, c)
-	warnBinary(stderr)
+	if m, err := autostart.Default(); err == nil {
+		warnBinary(stderr, m)
+	}
 	return commands.Status(ctx, c, *timeout, *asJSON, stdout)
 }

@@ -89,7 +89,7 @@ func Default() (*Manager, error) {
 	if exe, err = filepath.EvalSymlinks(exe); err != nil {
 		return nil, err
 	}
-	_, tokenFile, err := config.Paths()
+	lock, logPath, err := StatePaths()
 	if err != nil {
 		return nil, err
 	}
@@ -106,15 +106,13 @@ func Default() (*Manager, error) {
 			env[k] = v
 		}
 	}
-	state := filepath.Dir(tokenFile)
-	lock := filepath.Join(state, "watch.lock")
 	return &Manager{
 		GOOS:     runtime.GOOS,
 		Home:     home,
 		Config:   cfg,
 		Exe:      exe,
 		LockPath: lock,
-		LogPath:  filepath.Join(state, "watch.log"),
+		LogPath:  logPath,
 		Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).CombinedOutput()
 		},
@@ -124,6 +122,18 @@ func Default() (*Manager, error) {
 		UID:      os.Getuid(),
 		Env:      env,
 	}, nil
+}
+
+// StatePaths are the watch lock and the watch log, next to tokens.json. The
+// watch command takes them from here, so it and the manager cannot disagree
+// on where "running" is looked up.
+func StatePaths() (lock, log string, err error) {
+	_, tokenFile, err := config.Paths()
+	if err != nil {
+		return "", "", err
+	}
+	state := filepath.Dir(tokenFile)
+	return filepath.Join(state, "watch.lock"), filepath.Join(state, "watch.log"), nil
 }
 
 // backend is one registration mechanism.
@@ -181,6 +191,30 @@ func (m *Manager) Status() (Status, error) {
 		st.Path = path
 	}
 	return st, nil
+}
+
+// Registered reports whether the watch is registered and with which binary.
+// Unlike Status it runs no command and probes no lock, so a status bar can
+// call it on every poll: on Linux it does not ask systemd whether a user
+// session answers, it only looks for the unit or the desktop entry.
+func (m *Manager) Registered() (on bool, path string, err error) {
+	var b backend
+	switch m.GOOS {
+	case "darwin":
+		b = launchd{m}
+	case "windows":
+		b = winRun{m}
+	default:
+		switch {
+		case exists(m.unitPath()):
+			b = systemd{m}
+		case exists(m.desktopPath()):
+			b = xdg{m}
+		default:
+			return false, "", nil
+		}
+	}
+	return b.registered()
 }
 
 // Enable registers the current binary and (re)starts the watch with it. It

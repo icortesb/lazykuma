@@ -140,3 +140,31 @@ func TestBinaryWarning(t *testing.T) {
 		}
 	}
 }
+
+func TestWarnBinary(t *testing.T) {
+	home := t.TempDir()
+	m := &autostart.Manager{GOOS: "linux", Home: home, Config: filepath.Join(home, ".config"), Exe: "/new/lazykuma"}
+	unit := filepath.Join(m.Config, "systemd", "user", "lazykuma-watch.service")
+	warn := func() string {
+		var b bytes.Buffer
+		warnBinary(&b, m)
+		return b.String()
+	}
+
+	if w := warn(); w != "" {
+		t.Errorf("nothing registered warned: %q", w)
+	}
+	if err := os.MkdirAll(filepath.Dir(unit), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unit, []byte(autostart.SystemdUnit("/old/lazykuma", nil)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if w := warn(); !strings.Contains(w, "run /old/lazykuma, not this binary (/new/lazykuma)") {
+		t.Errorf("warning = %q", w)
+	}
+	m.Exe = "/old/lazykuma"
+	if w := warn(); w != "" {
+		t.Errorf("the registered binary warned: %q", w)
+	}
+}
