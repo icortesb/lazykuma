@@ -45,11 +45,13 @@ func systemdQuoteEnv(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s) + `"`
 }
 
-// parseSystemd returns the binary of the unit's ExecStart, or "".
-func parseSystemd(unit string) string {
+// parseSystemd returns the binary of the unit's ExecStart, or "". A unit
+// written by hand, as the README once showed, may start it from %h, the
+// home directory: that reads back as home.
+func parseSystemd(unit, home string) string {
 	for line := range strings.Lines(unit) {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "ExecStart="); ok {
-			return strings.NewReplacer("%%", "%", "$$", "$").Replace(firstWord(v))
+			return strings.NewReplacer("%%", "%", "%h", home, "$$", "$").Replace(firstWord(v))
 		}
 	}
 	return ""
@@ -96,7 +98,7 @@ func (s systemd) registered() (bool, string, error) {
 	if err != nil || !ok {
 		return false, "", err
 	}
-	return true, parseSystemd(unit), nil
+	return true, parseSystemd(unit, s.m.Home), nil
 }
 
 func (s systemd) enable() error {
@@ -111,6 +113,7 @@ func (s systemd) enable() error {
 			return err
 		}
 	}
+	s.m.awaitService()
 	return nil
 }
 

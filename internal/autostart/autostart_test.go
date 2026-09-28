@@ -60,6 +60,11 @@ type env struct {
 }
 
 func newEnv(t *testing.T, goos string) *env {
+	// Nothing takes the lock after a fake systemctl or launchctl: do not
+	// wait for it.
+	wait := serviceWait
+	serviceWait = 0
+	t.Cleanup(func() { serviceWait = wait })
 	dir := t.TempDir()
 	e := &env{t: t, fail: map[string]error{}, seq: map[string][]error{}, out: map[string]string{}, reg: fakeRegistry{}}
 	e.m = &Manager{
@@ -258,7 +263,7 @@ func TestTheRegisteredPathReadsBack(t *testing.T) {
 		`/home/me/back\slash\\/lazykuma`,
 		`/home/me/\s\n/lazykuma`,
 	} {
-		if got := parseSystemd(SystemdUnit(exe, nil)); got != exe {
+		if got := parseSystemd(SystemdUnit(exe, nil), "/home/me"); got != exe {
 			t.Errorf("systemd: %q read back as %q", exe, got)
 		}
 		if got := parseDesktop(DesktopEntry(exe)); got != exe {
@@ -686,8 +691,8 @@ ExecStart="/usr/bin/lazykuma" watch
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
-	if parseSystemd(got) != "/usr/bin/lazykuma" {
-		t.Fatalf("ExecStart read back as %q", parseSystemd(got))
+	if parseSystemd(got, "/home/me") != "/usr/bin/lazykuma" {
+		t.Fatalf("ExecStart read back as %q", parseSystemd(got, "/home/me"))
 	}
 }
 
@@ -837,5 +842,73 @@ func TestAWatchThatExitsAtOnceIsReported(t *testing.T) {
 		if err == nil || err.Error() != want {
 			t.Fatalf("%s: Enable = %v, want %q", goos, err, want)
 		}
+	}
+}
+
+func TestAHandWrittenUnitReadsBackFromHome(t *testing.T) {
+	unit := "[Service]\nExecStart=%h/.local/bin/lazykuma watch\n"
+	if got := parseSystemd(unit, "/home/me"); got != "/home/me/.local/bin/lazykuma" {
+		t.Fatalf("ExecStart read back as %q", got)
+	}
+	if got := parseSystemd("[Service]\nExecStart=/opt/%%h/lazykuma watch\n", "/home/me"); got != "/opt/%h/lazykuma" {
+		t.Fatalf("an escaped %%h read back as %q", got)
+	}
+}
+
+// startsLate makes command take the lock a moment after it returns, as
+// systemctl restart and launchctl bootstrap do.
+func (e *env) startsLate(command string) {
+	held := make(chan *watchlock.Lock, 1)
+	run := e.m.Run
+	e.m.Run = func(name string, args ...string) ([]byte, error) {
+		if strings.Join(append([]string{name}, args...), " ") == command {
+			go func() {
+				time.Sleep(100 * time.Millisecond)
+				l, err := watchlock.Acquire(e.m.LockPath)
+				if err != nil {
+					panic(err)
+				}
+				held <- l
+			}()
+		}
+		return run(name, args...)
+	}
+	e.t.Cleanup(func() {
+		select {
+		case l := <-held:
+			l.Release()
+		case <-time.After(5 * time.Second):
+		}
+	})
+}
+
+func TestEnableWaitsForTheServiceToStartTheWatch(t *testing.T) {
+	for _, tc := range []struct{ goos, command string }{
+		{"linux", "systemctl --user restart lazykuma-watch.service"},
+		{"darwin", "launchctl bootstrap gui/501 "},
+	} {
+		t.Run(tc.goos, func(t *testing.T) {
+			e := newEnv(t, tc.goos)
+			serviceWait = 2 * time.Second
+			command := tc.command
+			if tc.goos == "darwin" {
+				command += e.m.plistPath()
+			}
+			e.startsLate(command)
+			if err := e.m.Enable(); err != nil {
+				t.Fatal(err)
+			}
+			if _, running, err := watchlock.Holder(e.m.LockPath); err != nil || !running {
+				t.Fatalf("Enable returned before the watch took the lock: running %v, %v", running, err)
+			}
+		})
+	}
+}
+
+func TestEnableDoesNotFailWhenTheServiceIsSlow(t *testing.T) {
+	e := newEnv(t, "linux")
+	serviceWait = 100 * time.Millisecond
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
 	}
 }

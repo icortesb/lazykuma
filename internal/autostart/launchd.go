@@ -135,7 +135,11 @@ func (l launchd) enable() error {
 	deadline := time.Now().Add(bootstrapWait)
 	for {
 		err := l.m.run("launchctl", "bootstrap", l.domain(), l.m.plistPath())
-		if c := exitCode(err); err == nil || (c != 5 && c != 37) || time.Now().After(deadline) {
+		if err == nil {
+			l.m.awaitService()
+			return nil
+		}
+		if c := exitCode(err); (c != 5 && c != 37) || time.Now().After(deadline) {
 			return err
 		}
 		time.Sleep(bootstrapRetry)

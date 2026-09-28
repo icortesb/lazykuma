@@ -289,6 +289,25 @@ func (m *Manager) startWatch(argv []string) error {
 	}
 }
 
+// serviceWait is how long Enable waits for systemd or launchd to start the
+// watch, so what the caller reports next is not "not running" for a watch
+// that is a moment from taking the lock.
+var serviceWait = 2 * time.Second
+
+// awaitService waits up to serviceWait for a watch to hold the lock. A
+// watch that is slow to start, or one that keeps failing, is the service
+// manager's to retry and report, not a failure of Enable.
+func (m *Manager) awaitService() {
+	deadline := time.Now().Add(serviceWait)
+	for {
+		_, running, err := watchlock.Holder(m.LockPath)
+		if err != nil || running || time.Now().After(deadline) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // cmdError is a failed command, told the way the user would type it, with
 // what it printed.
 type cmdError struct {
