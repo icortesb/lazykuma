@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -347,7 +350,7 @@ func TestWatchReportsAnOutageOnce(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, c, sender, &out, func() time.Time { return t0 }) }()
+	go func() { done <- Watch(ctx, fixed(c), sender, &out, func() time.Time { return t0 }) }()
 
 	waitConnected(t, c, "home")
 	monitors(fakes["home"], map[int]string{1: "web"})
@@ -389,7 +392,7 @@ func TestWatchPrintsOnlyWhenNotificationsAreOff(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Watch(ctx, c, sender, &out, func() time.Time { return t0 })
+	go Watch(ctx, fixed(c), sender, &out, func() time.Time { return t0 })
 
 	waitConnected(t, c, "home")
 	monitors(fakes["home"], map[int]string{1: "web"})
@@ -439,7 +442,7 @@ func TestWatchReportsARefusedTokenAfterTheGracePeriod(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Watch(ctx, c, sender, &out, now)
+	go Watch(ctx, fixed(c), sender, &out, now)
 
 	waitConnected(t, c, "home")
 	monitors(f, map[int]string{1: "web"})
@@ -472,9 +475,276 @@ func TestWatchReportsARefusedTokenAfterTheGracePeriod(t *testing.T) {
 	}
 }
 
-func TestWatchWithoutInstances(t *testing.T) {
-	c, _ := running(t, "")
-	if err := Watch(context.Background(), c, &recorder{}, &bytes.Buffer{}, time.Now); err == nil {
-		t.Fatal("watch with no instances did not complain")
+// fixed is a source for a core the test already runs, whose config never
+// changes.
+func fixed(c *core.Core) WatchSource {
+	return WatchSource{
+		Open:  func(context.Context) (*core.Core, error) { return c, nil },
+		Stamp: func() string { return "" },
 	}
+}
+
+// files is a source over a real config and token file, as main builds it,
+// that also keeps the core it opened last so a test can wait on it.
+type files struct {
+	cfgPath, tokPath string
+	mu               sync.Mutex
+	c                *core.Core
+}
+
+func newFiles(t *testing.T) *files {
+	dir := t.TempDir()
+	return &files{cfgPath: filepath.Join(dir, "config.toml"), tokPath: filepath.Join(dir, "tokens.json")}
+}
+
+func (f *files) source() WatchSource {
+	return WatchSource{
+		Open: func(ctx context.Context) (*core.Core, error) {
+			c, err := core.Open(f.cfgPath, f.tokPath, core.Options{Now: func() time.Time { return t0 }})
+			if err != nil {
+				return nil, err
+			}
+			c.Run(ctx)
+			f.mu.Lock()
+			f.c = c
+			f.mu.Unlock()
+			return c, nil
+		},
+		Stamp: func() string { return config.Stamp(f.cfgPath, f.tokPath) },
+		Poll:  20 * time.Millisecond,
+	}
+}
+
+func (f *files) core() *core.Core {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.c
+}
+
+// add logs in to a new fake Kuma and appends it to the config. The token
+// goes first, so a reload between the two writes never sees the instance
+// logged out.
+func (f *files) add(t *testing.T, name string) *kumatest.Server {
+	t.Helper()
+	fake := kumatest.New(t, kumatest.Login(false))
+	tokens, err := config.LoadTokens(f.tokPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tokens.Set(name, fake.URL(), "jwt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.AppendInstance(f.cfgPath, config.Instance{Name: name, URL: fake.URL()}); err != nil {
+		t.Fatal(err)
+	}
+	return fake
+}
+
+// remove drops an instance from the config.
+func (f *files) remove(t *testing.T, name string) {
+	t.Helper()
+	cfg, _, err := config.Load(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Instances = slices.DeleteFunc(cfg.Instances, func(in config.Instance) bool { return in.Name == name })
+	if err := config.Save(f.cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// connected waits for a core other than old to have name connected, and
+// returns it.
+func (f *files) connected(t *testing.T, old *core.Core, name string) *core.Core {
+	t.Helper()
+	var c *core.Core
+	eventually(t, name+" connected in a new core", func() bool {
+		c = f.core()
+		if c == nil || c == old {
+			return false
+		}
+		in, ok := c.Instance(name)
+		return ok && in.State().Conn == state.ConnOK
+	})
+	return c
+}
+
+// watching runs Watch on src until the test ends.
+func watching(t *testing.T, src WatchSource, sender notify.Sender, out io.Writer) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, src, sender, out, func() time.Time { return t0 }) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+}
+
+func TestWatchReloadPicksUpAnAddedInstance(t *testing.T) {
+	f := newFiles(t)
+	f.add(t, "home")
+	var out syncBuffer
+	sender := &recorder{}
+	watching(t, f.source(), sender, &out)
+	first := f.connected(t, nil, "home")
+	eventually(t, "the header", func() bool { return strings.Contains(out.String(), "watching home; notifying on outages\n") })
+
+	away := f.add(t, "away")
+	c := f.connected(t, first, "away")
+	eventually(t, "the new header", func() bool {
+		return strings.Contains(out.String(), "config changed; reloading\n") &&
+			strings.Contains(out.String(), "watching home, away; notifying on outages\n")
+	})
+
+	// The new instance is watched: its outage is reported.
+	monitors(away, map[int]string{1: "db"})
+	beat(away, 1, 1, 1, "OK")
+	eventually(t, "the first beat", func() bool {
+		in, _ := c.Instance("away")
+		return in.State().Monitors[1].Status() == state.StatusUp
+	})
+	time.Sleep(100 * time.Millisecond)
+	beat(away, 1, 0, 2, "timeout")
+	eventually(t, "the notification", func() bool { return len(sender.all()) == 1 })
+	if got := sender.all()[0]; got != "✖ db is down | on away · timeout" {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+func TestWatchReloadForgetsARemovedInstance(t *testing.T) {
+	f := newFiles(t)
+	f.add(t, "home")
+	f.add(t, "away")
+	var out syncBuffer
+	watching(t, f.source(), &recorder{}, &out)
+	first := f.connected(t, nil, "away")
+	eventually(t, "away connected", func() bool { return strings.Count(out.String(), "away: ok") == 1 })
+
+	f.remove(t, "away")
+	eventually(t, "the header without away", func() bool { return strings.Contains(out.String(), "watching home; notifying") })
+	second := f.core()
+
+	// Added back, it is news again: what was known about it went with it.
+	f.add(t, "away")
+	f.connected(t, second, "away")
+	eventually(t, "away connected again", func() bool { return strings.Count(out.String(), "away: ok") == 2 })
+	if first == second {
+		t.Fatal("the removal did not reload")
+	}
+}
+
+func TestWatchReloadDoesNotReportAnOngoingOutageAgain(t *testing.T) {
+	f := newFiles(t)
+	home := f.add(t, "home")
+	var out syncBuffer
+	sender := &recorder{}
+	watching(t, f.source(), sender, &out)
+	first := f.connected(t, nil, "home")
+
+	monitors(home, map[int]string{1: "web", 2: "api"})
+	beat(home, 1, 1, 1, "OK")
+	eventually(t, "the first beat", func() bool {
+		in, _ := first.Instance("home")
+		return in.State().Monitors[1].Status() == state.StatusUp
+	})
+	time.Sleep(100 * time.Millisecond)
+	beat(home, 1, 0, 2, "timeout")
+	eventually(t, "the notification", func() bool { return len(sender.all()) == 1 })
+
+	// Any write reloads; nothing about home changed.
+	f.add(t, "spare")
+	c := f.connected(t, first, "home")
+	monitors(home, map[int]string{1: "web", 2: "api"})
+	beat(home, 1, 0, 3, "timeout")
+	beat(home, 2, 1, 3, "OK")
+	eventually(t, "the beats after the reload", func() bool {
+		in, _ := c.Instance("home")
+		st := in.State()
+		return st.Monitors[1].Status() == state.StatusDown && st.Monitors[2].Status() == state.StatusUp
+	})
+	time.Sleep(100 * time.Millisecond)
+
+	// A new outage is still reported, and by then web's state after the
+	// reload has been seen: it must not have been reported again.
+	beat(home, 2, 0, 4, "refused")
+	eventually(t, "the api outage", func() bool { return len(sender.all()) == 2 })
+	if got := sender.all(); !strings.HasPrefix(got[1], "✖ api is down") {
+		t.Fatalf("sent %v", got)
+	}
+	if n := strings.Count(out.String(), "home: ok"); n != 1 {
+		t.Errorf("home's connection printed %d times across the reload: %q", n, out.String())
+	}
+}
+
+func TestWatchWithoutInstancesWaits(t *testing.T) {
+	f := newFiles(t)
+	var out syncBuffer
+	watching(t, f.source(), &recorder{}, &out)
+	eventually(t, "the waiting line", func() bool {
+		return strings.Contains(out.String(), "no instances configured; waiting for one to be added\n")
+	})
+
+	// A change that still leaves no instances does not repeat it.
+	if err := os.WriteFile(f.cfgPath, []byte("[notify]\nwatch = false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the reload", func() bool { return strings.Contains(out.String(), "config changed; reloading\n") })
+	f.add(t, "home")
+	f.connected(t, nil, "home")
+	eventually(t, "the header", func() bool { return strings.Contains(out.String(), "watching home; notifying") })
+	if n := strings.Count(out.String(), "no instances configured"); n != 1 {
+		t.Errorf("the waiting line printed %d times: %q", n, out.String())
+	}
+}
+
+func TestWatchPrintsConfigWarnings(t *testing.T) {
+	f := newFiles(t)
+	if err := os.WriteFile(f.cfgPath, []byte("[[instance]]\nname = \"bad\"\nurl = \"ftp://x\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out syncBuffer
+	watching(t, f.source(), &recorder{}, &out)
+	eventually(t, "the warning", func() bool { return strings.Contains(out.String(), "lazykuma: config: ") })
+}
+
+func TestWatchFirstLoadErrorIsReturned(t *testing.T) {
+	src := WatchSource{
+		Open:  func(context.Context) (*core.Core, error) { return nil, errors.New("broken") },
+		Stamp: func() string { return "" },
+	}
+	err := Watch(context.Background(), src, &recorder{}, &bytes.Buffer{}, time.Now)
+	if err == nil || err.Error() != "broken" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestWatchReloadErrorIsRetriedOnTheNextChange(t *testing.T) {
+	c, _ := running(t, "", "home")
+	var stamp atomic.Int64
+	var opens atomic.Int64
+	src := WatchSource{
+		Open: func(context.Context) (*core.Core, error) {
+			if opens.Add(1) == 2 {
+				return nil, errors.New("tokens unreadable")
+			}
+			return c, nil
+		},
+		Stamp: func() string { return fmt.Sprint(stamp.Load()) },
+		Poll:  20 * time.Millisecond,
+	}
+	var out syncBuffer
+	watching(t, src, &recorder{}, &out)
+	eventually(t, "the first header", func() bool { return strings.Count(out.String(), "watching home;") == 1 })
+
+	stamp.Add(1)
+	eventually(t, "the error", func() bool { return strings.Contains(out.String(), "lazykuma: tokens unreadable\n") })
+	time.Sleep(100 * time.Millisecond)
+	if n := opens.Load(); n != 2 {
+		t.Fatalf("opened %d times with no change after the error", n)
+	}
+
+	stamp.Add(1)
+	eventually(t, "the header again", func() bool { return strings.Count(out.String(), "watching home;") == 2 })
 }

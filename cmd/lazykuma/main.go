@@ -148,17 +148,28 @@ func watch(args []string, stdout, stderr io.Writer) int {
 		return code
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	c, err := open(ctx)
+	cfgPath, tokPath, err := config.Paths()
 	if err != nil {
 		return fail(stderr, err)
 	}
-	warn(stderr, c)
+	src := commands.WatchSource{
+		Open: func(ctx context.Context) (*core.Core, error) {
+			c, err := core.Open(cfgPath, tokPath, core.Options{})
+			if err != nil {
+				return nil, err
+			}
+			c.Run(ctx)
+			return c, nil
+		},
+		Stamp: func() string { return config.Stamp(cfgPath, tokPath) },
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	desktop := notify.Async(notify.Desktop{}, func(err error) {
 		fmt.Fprintln(stderr, "lazykuma: desktop notification:", err)
 	})
-	return fail(stderr, commands.Watch(ctx, c, desktop, stdout, time.Now))
+	return fail(stderr, commands.Watch(ctx, src, desktop, stdout, time.Now))
 }
 
 // parse reads a subcommand's flags. done means the command must stop here

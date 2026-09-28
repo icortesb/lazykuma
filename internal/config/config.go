@@ -285,6 +285,24 @@ func (t *Tokens) Set(name, url, token string) error {
 	return writeAtomic(t.path, append(data, '\n'), 0o600)
 }
 
+// Stamp changes whenever one of the files at paths changes: it is each
+// file's modification time and size, "-" for one that is missing. Watching
+// the stamp is enough to notice an edit, since every write lazykuma makes
+// replaces the file; Stat follows a symlink, so a dotfiles setup that
+// edits the target is noticed too.
+func Stamp(paths ...string) string {
+	parts := make([]string, 0, len(paths))
+	for _, p := range paths {
+		fi, err := os.Stat(p)
+		if err != nil {
+			parts = append(parts, "-")
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%d:%d", fi.ModTime().UnixNano(), fi.Size()))
+	}
+	return strings.Join(parts, " ")
+}
+
 // writeAtomic writes through a temporary file and a rename, so a crash never
 // leaves half a file behind. When path is a symlink (a dotfiles setup), the
 // temp file and the rename happen at its target, so the link itself is left
