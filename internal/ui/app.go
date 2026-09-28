@@ -43,25 +43,31 @@ const (
 	screenLogin
 	screenAdd
 	screenHelp
-	screenPick         // a type or a service, before its form
-	screenMonitor      // the curated monitor form
-	screenRaw          // the raw field editor
-	screenChannels     // the instance's notification channels
-	screenChannel      // one channel's form
-	screenSilence      // silence a monitor
-	screenSilenced     // what is silenced
-	screenIncidents    // state changes
-	screenConfirm      // before something irreversible
-	screenName         // a group's name
-	screenTags         // an instance's tags
-	screenTag          // one tag's form
-	screenDetail       // one monitor at full size
-	screenPages        // an instance's status pages
-	screenPageNew      // a new status page's title and slug
-	screenPageDelete   // a page's slug, before deleting it
-	screenPageSettings // a page's settings
-	screenPageSections // a page's sections and their monitors
-	screenPageIncident // a page's pinned incident
+	screenPick          // a type or a service, before its form
+	screenMonitor       // the curated monitor form
+	screenRaw           // the raw field editor
+	screenChannels      // the instance's notification channels
+	screenChannel       // one channel's form
+	screenSilence       // silence a monitor
+	screenSilenced      // what is silenced
+	screenIncidents     // state changes
+	screenConfirm       // before something irreversible
+	screenName          // a group's name
+	screenTags          // an instance's tags
+	screenTag           // one tag's form
+	screenDetail        // one monitor at full size
+	screenPages         // an instance's status pages
+	screenPageNew       // a new status page's title and slug
+	screenPageDelete    // a page's slug, before deleting it
+	screenPageSettings  // a page's settings
+	screenPageSections  // a page's sections and their monitors
+	screenPageIncident  // a page's pinned incident
+	screenServer        // an instance's API keys, proxies, Docker hosts and database
+	screenAPIKey        // a new API key's form
+	screenAPIKeyShown   // a new API key's secret, shown once
+	screenServerConfirm // a typed confirmation, before clearing the statistics
+	screenProxy         // a proxy's form
+	screenDockerHost    // a Docker host's form
 )
 
 // instance is an instance as the screens see it: the core's handle for
@@ -103,10 +109,17 @@ type Model struct {
 	detail   detailScreen
 	pages    pagesScreen
 	pnew     newPageForm
-	pdel     slugConfirm
+	pdel     typedConfirm
 	pset     pageSettings
 	secs     sectionsEditor
 	pinc     incidentForm
+	srv      serverScreen
+	akform   apiKeyForm
+	akshown  apiKeyShown // the only copy lazykuma holds of a new key, zeroed when it closes
+	sconf    typedConfirm
+	pform    proxyForm
+	dform    dockerForm
+	dtest    dockerTest    // the Docker host test on its way, if any
 	moving   state.Monitor // what the move or delete-group picker acts on, fixed when it opened
 
 	tagDefs map[string][]kuma.TagDef // each instance's tags, as last fetched
@@ -263,6 +276,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.saved && msg.from == m.screen && (m.screen == screenMonitor || m.screen == screenRaw) {
 				m.screen = m.backTo
 			}
+			// The form stays, for the user to try again.
+			switch msg.from {
+			case screenDockerHost:
+				m.dform.pending = false
+			case screenProxy:
+				m.pform.pending = false
+			}
 			return m, flashFor(fmt.Sprintf("%s: %v", msg.mon, kuma.Brief(msg.err)), 8*time.Second)
 		}
 		// A write lands: its own form closes, and the instance's next state
@@ -275,10 +295,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.from != m.screen:
 		case m.screen == screenMonitor, m.screen == screenRaw, m.screen == screenChannel, m.screen == screenSilence,
 			m.screen == screenName, m.screen == screenTag, m.screen == screenPageNew, m.screen == screenPageDelete,
-			m.screen == screenPageSettings, m.screen == screenPageIncident:
+			m.screen == screenPageSettings, m.screen == screenPageIncident, m.screen == screenServerConfirm:
 			m.screen = m.backTo
+		case m.screen == screenProxy, m.screen == screenDockerHost:
+			// The proxy form always returns to the server screen: backTo
+			// is its own while the question before applying it to every
+			// monitor is up. The Docker host form, opened from the same
+			// screen, returns there too.
+			m.screen = screenServer
 		}
 		done := flashFor(msg.action+" "+msg.mon, 3*time.Second)
+		if msg.from == screenServerConfirm {
+			// What is on screen still holds the old history; see
+			// clearStatistics.
+			done = flashFor(msg.action+" "+msg.mon+"; the charts fill again as monitors check", 5*time.Second)
+		}
 		if m.screen == screenDetail {
 			if _, ok := m.current().st.Monitors[m.detail.id]; !ok {
 				m.screen = screenInstance
@@ -292,6 +323,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var fetch tea.Cmd
 			m.detail, fetch = m.refreshDetail()
 			return m, tea.Batch(done, fetch)
+		}
+		if msg.action == "shrank" && msg.name == m.current().name() {
+			// A smaller file is the point of shrinking: show how small.
+			return m, tea.Batch(done, loadDBSize(m.current().inst))
 		}
 		if m.screen == screenTags || strings.HasPrefix(msg.mon, "tag ") {
 			return m, tea.Batch(done, loadTags(m.current().inst))
@@ -412,6 +447,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case dbSized:
+		// An answer for another instance, asked before the user moved on,
+		// would show its size as this one's.
+		if msg.instance == m.current().name() {
+			m.srv = m.srv.withSize(msg)
+		}
+		return m, nil
+
+	case apiKeyMade:
+		return m.apiKeyMade(msg)
+	case dockerTested:
+		return m.dockerTested(msg)
+
 	case loginDone:
 		return m.loginFinished(msg)
 
@@ -449,6 +497,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updatePages(msg)
 		case screenPageSections:
 			return m.updateSections(msg)
+		case screenServer:
+			return m.updateServer(msg)
+		case screenAPIKeyShown:
+			return m.updateAPIKeyShown(msg)
 		case screenConfirm:
 			answered, yes := m.ask.Update(msg)
 			if !answered {
@@ -456,6 +508,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			cmd := m.onYes
 			m.screen, m.onYes = m.backTo, nil
+			if m.screen == screenProxy {
+				// The proxy form's save waits on this question: a yes
+				// sends it, and the form must not send it twice.
+				m.pform.pending = yes
+			}
 			if !yes {
 				return m, nil
 			}
@@ -494,6 +551,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateSlugConfirm(msg)
 	case screenPageIncident:
 		return m.updatePageIncident(msg)
+	case screenAPIKey:
+		return m.updateAPIKeyForm(msg)
+	case screenServerConfirm:
+		return m.updateServerConfirm(msg)
+	case screenProxy:
+		return m.updateProxyForm(msg)
+	case screenDockerHost:
+		return m.updateDockerForm(msg)
 	}
 	return m, nil
 }
@@ -589,6 +654,8 @@ func (m Model) updateInstance(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		cmd = loadTags(in.inst)
 	case instPages:
 		m.pages, m.screen = pagesScreen{}, screenPages
+	case instServer:
+		m.srv, m.screen = serverScreen{}, screenServer
 	case instDetail:
 		if hasRow {
 			m.detail, m.screen = newDetailScreen(row.ID, in.st), screenDetail
@@ -748,6 +815,23 @@ func (m Model) render() string {
 		return m.chrome(m.pinc.View(), "")
 	case screenPageSections:
 		return m.chrome(m.secs.View(m.width, m.height-2), keyHintsSections)
+	case screenServer:
+		in := m.current()
+		// The screen is made afresh each time it opens; the test on its
+		// way is the model's, so its row keeps saying so.
+		srv := m.srv
+		srv.test = m.dtest
+		return m.chrome(srv.View(in.name(), in.st, m.width, m.height-2), srv.hints())
+	case screenAPIKey:
+		return m.chrome(m.akform.View(), "")
+	case screenAPIKeyShown:
+		return m.chrome(m.akshown.View(m.width), "")
+	case screenServerConfirm:
+		return m.chrome(m.sconf.View(), "")
+	case screenProxy:
+		return m.chrome(m.pform.View(), "")
+	case screenDockerHost:
+		return m.chrome(m.dform.View(), "")
 	}
 
 	names := make([]string, len(m.insts))
@@ -796,6 +880,7 @@ func helpText() string {
 		{"On a monitor's detail", keyHintsDetail},
 		{"On status pages", keyHintsPages},
 		{"On a page's sections", keyHintsSections},
+		{"On the server screen", keyHintsServer},
 	} {
 		b.WriteString("\n" + styleHeading.Render(sec.heading) + "\n\n")
 		for _, part := range strings.Split(sec.hints, "   ") {

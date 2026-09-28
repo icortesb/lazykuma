@@ -330,3 +330,18 @@ func TestStatusPages(t *testing.T) {
 		t.Fatalf("after delete: %+v", in.StatusPages)
 	}
 }
+
+func TestAdminLists(t *testing.T) {
+	in := Apply(Instance{}, kuma.Connected{}, t0)
+	in = Apply(in, kuma.APIKeyList{Keys: []kuma.APIKey{{ID: 1, Name: "grafana", Active: true}}}, t0)
+	in = Apply(in, kuma.ProxyList{Proxies: []kuma.Proxy{{ID: 1, Protocol: "http", Host: "10.0.0.6", Port: 3128}}}, t0)
+	in = Apply(in, kuma.DockerHostList{Hosts: []kuma.DockerHost{{ID: 1, Name: "local", Type: "socket", Daemon: "/var/run/docker.sock"}}}, t0)
+	if len(in.APIKeys) != 1 || len(in.Proxies) != 1 || len(in.DockerHosts) != 1 {
+		t.Fatalf("lists = %+v %+v %+v", in.APIKeys, in.Proxies, in.DockerHosts)
+	}
+	// Each push replaces its list whole.
+	in = Apply(in, kuma.ProxyList{}, t0)
+	if len(in.Proxies) != 0 || len(in.APIKeys) != 1 {
+		t.Fatalf("after an empty proxy list: %+v %+v", in.Proxies, in.APIKeys)
+	}
+}

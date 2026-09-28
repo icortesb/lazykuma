@@ -18,6 +18,7 @@ const (
 	formNone formAction = iota
 	formCancel
 	formSubmit
+	formTest // try the values without saving them: the Docker host form's t
 )
 
 // echoPassword hides what is typed in a secret field.

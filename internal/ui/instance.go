@@ -64,6 +64,7 @@ const (
 	instTags      // the instance's tags
 	instDetail    // open the selected monitor's detail
 	instPages     // the instance's status pages
+	instServer    // the instance's API keys, proxies, Docker hosts and database
 )
 
 // rows is the list as it shows: the tree, searched, filtered, sorted and
@@ -179,6 +180,8 @@ func (s instanceScreen) Update(msg tea.KeyMsg, st state.Instance) (instanceScree
 		return s, instTags, nil
 	case msg.String() == "S":
 		return s, instPages, nil
+	case msg.String() == "A":
+		return s, instServer, nil
 	case hasRow && msg.String() == "v":
 		return s, instMove, nil
 	case hasRow && !row.Group && msg.String() == "C":
@@ -245,7 +248,7 @@ func (s instanceScreen) View(name string, st state.Instance, width, height int) 
 
 // keyHints is the footer of the instance screen, which now does rather more
 // than watch.
-const keyHints = "n new   enter detail   g group   e edit   d delete   v move   C clone   r fields   p pause   space fold   m silence   M silenced   t tags   S status pages   c channels   i incidents   / search   f show   s sort   esc menu"
+const keyHints = "n new   enter detail   g group   e edit   d delete   v move   C clone   r fields   p pause   space fold   m silence   M silenced   t tags   S status pages   A server   c channels   i incidents   / search   f show   s sort   esc menu"
 
 // staleNote says the instance's data is not live, and since when, or is
 // empty while it is connected.

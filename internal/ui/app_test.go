@@ -198,6 +198,29 @@ func kumaWrites(t *testing.T) func(string, []json.RawMessage) any {
 			}
 			inc["id"], inc["pin"] = 3, true
 			return map[string]any{"ok": true, "incident": inc}
+		// The admin calls, answered as Kuma 2.5.3 did when probed.
+		case "addAPIKey":
+			return map[string]any{"ok": true, "msg": "successAdded", "msgi18n": true, "key": "uk1_secret", "keyID": 1}
+		case "enableAPIKey", "disableAPIKey", "deleteAPIKey", "deleteProxy", "deleteDockerHost", "shrinkDatabase", "clearStatistics":
+			return map[string]any{"ok": true}
+		case "addProxy":
+			var p map[string]any
+			json.Unmarshal(args[0], &p)
+			if p["protocol"] == "ftp" {
+				return map[string]any{"ok": false, "msg": "\n                Unsupported proxy protocol \"ftp."}
+			}
+			return map[string]any{"ok": true, "msg": "Saved.", "id": 4}
+		case "addDockerHost":
+			return map[string]any{"ok": true, "msg": "Saved.", "id": 2}
+		case "testDockerHost":
+			var h map[string]any
+			json.Unmarshal(args[0], &h)
+			if h["dockerType"] == "tcp" {
+				return map[string]any{"ok": true, "msg": "Connected Successfully. Amount of containers: 3"}
+			}
+			return map[string]any{"ok": false, "msg": "connect ENOENT /var/run/docker.sock"}
+		case "getDatabaseSize":
+			return map[string]any{"ok": true, "size": 61440}
 		}
 		return login(event, args)
 	}

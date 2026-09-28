@@ -324,6 +324,22 @@ func DecodeEvent(name string, args []json.RawMessage) (ev Event, ok bool, err er
 		pl, err := decodeStatusPageList(a)
 		return pl, err == nil, err
 
+	case "apiKeyList", "proxyList", "dockerHostList":
+		a, err := arg(0)
+		if err != nil {
+			return nil, false, err
+		}
+		switch name {
+		case "apiKeyList":
+			v, err := decodeAPIKeyList(a)
+			return v, err == nil, err
+		case "proxyList":
+			v, err := decodeProxyList(a)
+			return v, err == nil, err
+		}
+		v, err := decodeDockerHostList(a)
+		return v, err == nil, err
+
 	case "info":
 		a, err := arg(0)
 		if err != nil {
