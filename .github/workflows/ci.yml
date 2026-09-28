@@ -95,6 +95,16 @@ jobs:
           foreach ($p in $procs) {
             if ($p.MainWindowHandle -ne 0) { throw "lazykuma pid $($p.Id) has a window" }
           }
+
+          # The instance is unreachable, so watch alerts after its 30 s grace
+          # period; the line in the log proves the --log path works.
+          $log = Join-Path $env:LOCALAPPDATA 'lazykuma\watch.log'
+          $seen = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'unreachable' -Quiet)) { $seen = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $seen) { Write-Host "::notice::no 'unreachable' line in watch.log within 60 s" }
       - name: autostart off removes the value and stops watch
         shell: pwsh
         run: |
@@ -117,7 +127,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          & (Resolve-Path bin/lazykuma.exe).Path autostart off
+          if (Test-Path bin/lazykuma.exe) { & (Resolve-Path bin/lazykuma.exe).Path autostart off }
           exit 0
       - name: collect the log
         if: always()
@@ -150,25 +160,32 @@ jobs:
           plist="$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
           label=io.github.icortesb.lazykuma.watch
           bin="$PWD/bin/lazykuma"
+          log="$HOME/Library/Logs/lazykuma/watch.log"
+          mkdir -p out
 
           # Without a GUI session the bootstrap may fail after the plist is
           # written; that is a runner limitation, not a bug in lazykuma.
           gui=yes
           if ! "$bin" autostart on; then
-            echo "::notice::autostart on failed (no GUI launchd domain on this runner?); skipping the running checks"
+            if [ ! -f "$plist" ]; then
+              echo "::error::autostart on failed and wrote no plist"; exit 1
+            fi
+            echo "::notice::autostart on failed after writing the plist (no GUI launchd domain on this runner?); skipping the running checks"
             gui=no
           fi
+          echo "gui=$gui" >> "$GITHUB_ENV"
 
           if [ -f "$plist" ]; then
             plutil -lint "$plist"
             cat "$plist"
-          elif [ "$gui" = yes ]; then
+          else
             echo "::error::autostart on succeeded but wrote no plist"; exit 1
           fi
 
           if [ "$gui" = yes ] && ! launchctl print "gui/$(id -u)/$label"; then
             echo "::notice::gui/$(id -u) has no $label loaded; skipping the running checks"
             gui=no
+            echo "gui=no" >> "$GITHUB_ENV"
           fi
 
           if [ "$gui" = yes ]; then
@@ -179,24 +196,44 @@ jobs:
             done
             cat status.txt
             if [ "$running" != yes ]; then echo "::error::watch did not report running within 20 s"; exit 1; fi
+
+            # The instance is unreachable, so watch raises an alert after its
+            # 30 s grace period: shoot the screen once the notification shows.
+            seen=no
+            for i in $(seq 60); do
+              if grep -q unreachable "$log" 2>/dev/null; then seen=yes; break; fi
+              sleep 1
+            done
+            [ "$seen" = yes ] || echo "::notice::no 'unreachable' line in watch.log within 60 s"
+            sleep 1
           fi
 
-          screencapture -x shot.png || echo "::notice::screencapture failed"
+          screencapture -x out/shot.png || echo "::notice::screencapture failed"
       - name: autostart off removes the agent
         run: |
           plist="$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
-          "$PWD/bin/lazykuma" autostart off || { echo "::error::autostart off failed"; exit 1; }
+          if ! "$PWD/bin/lazykuma" autostart off; then
+            if [ "$gui" = no ]; then
+              echo "::notice::autostart off failed (no GUI launchd domain); removing the plist by hand"
+              rm -f "$plist"
+            else
+              echo "::error::autostart off failed"; exit 1
+            fi
+          fi
           if [ -e "$plist" ]; then echo "::error::plist left behind after autostart off"; exit 1; fi
       - name: leave the runner clean
         if: always()
         run: |
           "$PWD/bin/lazykuma" autostart off || true
           rm -f "$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
+      - name: collect the log
+        if: always()
+        run: |
+          mkdir -p out
+          cp "$HOME/Library/Logs/lazykuma/watch.log" out/ || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: autostart-macos
-          path: |
-            shot.png
-            ~/Library/Logs/lazykuma/watch.log
+          path: out
           if-no-files-found: warn
