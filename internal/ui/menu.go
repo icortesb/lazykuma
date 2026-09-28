@@ -18,6 +18,7 @@ type menuItem struct {
 	desc   string
 	inst   int // index into the app's instances; -1 for a fixed entry
 	target screen
+	bg     bool // the background alerts switch, whose label changes
 }
 
 // menuModel is the menu of mdg-tui: the logo, the entries centred, the

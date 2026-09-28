@@ -110,7 +110,12 @@ func tui() error {
 		return err
 	}
 
-	p := tea.NewProgram(ui.New(ui.Deps{Core: c, Login: kuma.Login, Version: version}), tea.WithAltScreen())
+	deps := ui.Deps{Core: c, Login: kuma.Login, Version: version}
+	// Without a manager (no home directory, say) the menu hides the switch.
+	if a, err := autostart.Default(); err == nil {
+		deps.Autostart = a
+	}
+	p := tea.NewProgram(ui.New(deps), tea.WithAltScreen())
 
 	// Every change the core announces becomes a message for the program,
 	// and a desktop notification when the config asks for one.
