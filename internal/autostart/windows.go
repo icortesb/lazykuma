@@ -66,7 +66,7 @@ func (w winRun) enable() error {
 	if err := w.m.stopHolder(); err != nil {
 		return err
 	}
-	return w.m.Start([]string{"conhost.exe", "--headless", w.m.Exe, "watch", "--log"})
+	return w.m.startWatch([]string{"conhost.exe", "--headless", w.m.Exe, "watch", "--log"})
 }
 
 func (w winRun) disable() error {

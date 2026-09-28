@@ -11,12 +11,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// startDetached starts argv in a session of its own, so closing the
-// terminal lazykuma runs in does not hang it up. Its standard streams are
-// the null device. It is waited for on a goroutine rather than released, so
-// that a TUI left open does not collect zombies.
-func startDetached(argv []string) error {
+// startDetached starts argv in a session of its own, so closing the terminal
+// lazykuma runs in does not hang it up, and in dir, the home directory, so
+// it does not keep the directory lazykuma was started in busy. Its standard
+// streams are the null device. It is waited for on a goroutine rather than
+// released, so that a TUI left open does not collect zombies.
+func startDetached(dir string, argv []string) error {
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err

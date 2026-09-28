@@ -65,7 +65,7 @@ func (x xdg) enable() error {
 	if err := x.m.stopHolder(); err != nil {
 		return err
 	}
-	return x.m.Start([]string{x.m.Exe, "watch", "--log"})
+	return x.m.startWatch([]string{x.m.Exe, "watch", "--log"})
 }
 
 func (x xdg) disable() error {

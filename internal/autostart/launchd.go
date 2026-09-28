@@ -3,19 +3,31 @@ package autostart
 import (
 	"encoding/xml"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const launchdLabel = "io.github.icortesb.lazykuma.watch"
 
-// LaunchdPlist is the launch agent that runs the watch. launchd writes its
+// LaunchdPlist is the launch agent that runs the watch, with env set for it.
+// launchd writes its
 // output to logPath itself, so it does not pass --log. KeepAlive restarts it
 // when it fails, a watch that found another one running included: that one
 // takes over when the other stops.
-func LaunchdPlist(exe, logPath string) string {
+func LaunchdPlist(exe, logPath string, env map[string]string) string {
+	var envDict strings.Builder
+	if len(env) > 0 {
+		envDict.WriteString("\t<key>EnvironmentVariables</key>\n\t<dict>\n")
+		for _, k := range slices.Sorted(maps.Keys(env)) {
+			envDict.WriteString("\t\t<key>" + xmlEscape(k) + "</key>\n\t\t<string>" + xmlEscape(env[k]) + "</string>\n")
+		}
+		envDict.WriteString("\t</dict>\n")
+	}
 	return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -27,7 +39,7 @@ func LaunchdPlist(exe, logPath string) string {
 		<string>` + xmlEscape(exe) + `</string>
 		<string>watch</string>
 	</array>
-	<key>RunAtLoad</key>
+` + envDict.String() + `	<key>RunAtLoad</key>
 	<true/>
 	<key>KeepAlive</key>
 	<dict>
@@ -114,12 +126,26 @@ func (l launchd) enable() error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return err
 	}
-	if err := writeFile(l.m.plistPath(), LaunchdPlist(l.m.Exe, logPath)); err != nil {
+	if err := writeFile(l.m.plistPath(), LaunchdPlist(l.m.Exe, logPath, l.m.Env)); err != nil {
 		return err
 	}
 	_ = l.m.run("launchctl", "bootout", l.domain()+"/"+launchdLabel)
-	return l.m.run("launchctl", "bootstrap", l.domain(), l.m.plistPath())
+	// bootout returns before launchd has torn the job down, and until then
+	// bootstrap fails with 5 (input/output error) or 37 (operation already
+	// in progress).
+	deadline := time.Now().Add(bootstrapWait)
+	for {
+		err := l.m.run("launchctl", "bootstrap", l.domain(), l.m.plistPath())
+		if c := exitCode(err); err == nil || (c != 5 && c != 37) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(bootstrapRetry)
+	}
 }
+
+// bootstrapWait is how long enable retries bootstrap while the old job is
+// torn down, bootstrapRetry how long it waits between tries.
+var bootstrapWait, bootstrapRetry = 5 * time.Second, 250 * time.Millisecond
 
 func (l launchd) disable() error {
 	if err := l.m.run("launchctl", "bootout", l.domain()+"/"+launchdLabel); err != nil && !notLoaded(err) {

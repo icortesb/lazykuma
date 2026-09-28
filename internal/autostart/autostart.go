@@ -69,6 +69,9 @@ type Manager struct {
 	Registry Registry
 	// UID names the launchd GUI domain, gui/<uid>; only macOS uses it.
 	UID int
+	// Env is the environment the systemd unit and the launch agent set for
+	// the watch: XDG_CONFIG_HOME and XDG_STATE_HOME when the caller has them.
+	Env map[string]string
 }
 
 // Default is a Manager for the running system. It runs no command: which
@@ -94,6 +97,15 @@ func Default() (*Manager, error) {
 	if cfg == "" {
 		cfg = filepath.Join(home, ".config")
 	}
+	// The service manager does not start the watch with this environment,
+	// so it is written into the unit and the plist: the watch must read the
+	// config and hold the lock the CLI does.
+	env := map[string]string{}
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_STATE_HOME"} {
+		if v := os.Getenv(k); v != "" {
+			env[k] = v
+		}
+	}
 	state := filepath.Dir(tokenFile)
 	lock := filepath.Join(state, "watch.lock")
 	return &Manager{
@@ -106,10 +118,11 @@ func Default() (*Manager, error) {
 		Run: func(name string, args ...string) ([]byte, error) {
 			return exec.Command(name, args...).CombinedOutput()
 		},
-		Start:    startDetached,
+		Start:    func(argv []string) error { return startDetached(home, argv) },
 		Stop:     func(pid int) error { return stopProcess(pid, lock) },
 		Registry: systemRegistry,
 		UID:      os.Getuid(),
+		Env:      env,
 	}, nil
 }
 
@@ -123,17 +136,23 @@ type backend interface {
 	disable() error
 }
 
-func (m *Manager) backend() backend {
+// backend picks the mechanism. On Linux what is already registered wins, so
+// Status and Disable see it even when the choice would differ today: a unit
+// file stays systemd with the user session gone, and an XDG entry written
+// when systemd did not answer stays XDG once it does. Enable is the one
+// call that moves an XDG registration to systemd (forEnable).
+func (m *Manager) backend(forEnable bool) backend {
 	switch m.GOOS {
 	case "darwin":
 		return launchd{m}
 	case "windows":
 		return winRun{m}
 	}
-	// A unit file left behind means systemd was chosen before, and must
-	// be the one Disable cleans up even if the user session is gone now.
-	if _, err := os.Stat(m.unitPath()); err == nil {
+	if exists(m.unitPath()) {
 		return systemd{m}
+	}
+	if !forEnable && exists(m.desktopPath()) {
+		return xdg{m}
 	}
 	if _, err := m.Run("systemctl", "--user", "show-environment"); err == nil {
 		return systemd{m}
@@ -141,9 +160,14 @@ func (m *Manager) backend() backend {
 	return xdg{m}
 }
 
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // Status reports the registration and the running watch.
 func (m *Manager) Status() (Status, error) {
-	b := m.backend()
+	b := m.backend(false)
 	on, path, err := b.registered()
 	if err != nil {
 		return Status{}, err
@@ -165,12 +189,12 @@ func (m *Manager) Enable() error {
 	if m.Exe == "" {
 		return errors.New("the path of this binary is unknown")
 	}
-	return m.backend().enable()
+	return m.backend(true).enable()
 }
 
 // Disable unregisters the watch and stops it.
 func (m *Manager) Disable() error {
-	return m.backend().disable()
+	return m.backend(false).disable()
 }
 
 // pidWait is how long to wait for a watch that holds the lock but has not
@@ -204,6 +228,27 @@ func (m *Manager) stopHolder() error {
 		return fmt.Errorf("stop the running watch (pid %d): %w", pid, err)
 	}
 	return nil
+}
+
+// startWait is how long a watch started by Enable gets to take the lock.
+var startWait = 2 * time.Second
+
+// startWatch starts argv detached and waits for it to take the lock, so a
+// watch that exits at once is reported rather than taken for running.
+func (m *Manager) startWatch(argv []string) error {
+	if err := m.Start(argv); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(startWait)
+	for {
+		if _, running, err := watchlock.Holder(m.LockPath); err == nil && running {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("watch exited right after starting; see %s", m.LogPath)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // cmdError is a failed command, told the way the user would type it, with
@@ -250,7 +295,11 @@ func writeFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(content), 0o644)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return err
+	}
+	// WriteFile's mode applies only to a new file, and through the umask.
+	return os.Chmod(path, 0o644)
 }
 
 // readFile reads a registration file; a missing one is not an error.

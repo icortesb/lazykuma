@@ -2,6 +2,7 @@ package autostart
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,13 +42,17 @@ func (r fakeRegistry) Delete(name string) error {
 // fail and out, Start and Stop are recorded, and a watch "runs" by holding a
 // real lock in a temporary directory.
 type env struct {
-	t      *testing.T
-	m      *Manager
-	calls  []string
-	fail   map[string]error
-	out    map[string]string
-	starts [][]string
-	stops  []int
+	t     *testing.T
+	m     *Manager
+	calls []string
+	fail  map[string]error
+	// seq answers a command from its head first, one error per call.
+	seq map[string][]error
+	// startDies makes a started watch exit before taking the lock.
+	startDies bool
+	out       map[string]string
+	starts    [][]string
+	stops     []int
 	// events is the order of commands, starts and stops.
 	events []string
 	lock   *watchlock.Lock
@@ -56,11 +61,12 @@ type env struct {
 
 func newEnv(t *testing.T, goos string) *env {
 	dir := t.TempDir()
-	e := &env{t: t, fail: map[string]error{}, out: map[string]string{}, reg: fakeRegistry{}}
+	e := &env{t: t, fail: map[string]error{}, seq: map[string][]error{}, out: map[string]string{}, reg: fakeRegistry{}}
 	e.m = &Manager{
-		GOOS:     goos,
-		Home:     filepath.Join(dir, "home"),
-		Config:   filepath.Join(dir, "home", ".config"),
+		GOOS: goos,
+		Home: filepath.Join(dir, "home"),
+		// XDG_CONFIG_HOME elsewhere, as the systemd unit must ignore it.
+		Config:   filepath.Join(dir, "xdg-config"),
 		Exe:      "/opt/lazy kuma/lazykuma",
 		LockPath: filepath.Join(dir, "state", "watch.lock"),
 		LogPath:  filepath.Join(dir, "state", "watch.log"),
@@ -68,11 +74,18 @@ func newEnv(t *testing.T, goos string) *env {
 			c := strings.Join(append([]string{name}, args...), " ")
 			e.calls = append(e.calls, c)
 			e.events = append(e.events, c)
+			if q := e.seq[c]; len(q) > 0 {
+				e.seq[c] = q[1:]
+				return []byte(e.out[c]), q[0]
+			}
 			return []byte(e.out[c]), e.fail[c]
 		},
 		Start: func(argv []string) error {
 			e.starts = append(e.starts, argv)
 			e.events = append(e.events, "start")
+			if !e.startDies && e.lock == nil {
+				e.hold()
+			}
 			return nil
 		},
 		Stop: func(pid int) error {
@@ -152,13 +165,13 @@ RestartSec=30
 [Install]
 WantedBy=default.target
 `
-	if got := SystemdUnit("/usr/local/bin/lazykuma"); got != want {
+	if got := SystemdUnit("/usr/local/bin/lazykuma", nil); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
 func TestSystemdUnitQuotesThePath(t *testing.T) {
-	got := SystemdUnit(`/home/a b/"x"/100%/$HOME/c\d`)
+	got := SystemdUnit(`/home/a b/"x"/100%/$HOME/c\d`, nil)
 	want := `ExecStart="/home/a b/\"x\"/100%%/$$HOME/c\\d" watch` + "\n"
 	if !strings.Contains(got, want) {
 		t.Fatalf("got:\n%s\nwant a line %q", got, want)
@@ -220,7 +233,7 @@ func TestLaunchdPlist(t *testing.T) {
 </dict>
 </plist>
 `
-	if got := LaunchdPlist("/Users/me/bin/lazy&kuma", "/Users/me/Library/Logs/lazykuma/watch.log"); got != want {
+	if got := LaunchdPlist("/Users/me/bin/lazy&kuma", "/Users/me/Library/Logs/lazykuma/watch.log", nil); got != want {
 		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
@@ -245,13 +258,13 @@ func TestTheRegisteredPathReadsBack(t *testing.T) {
 		`/home/me/back\slash\\/lazykuma`,
 		`/home/me/\s\n/lazykuma`,
 	} {
-		if got := parseSystemd(SystemdUnit(exe)); got != exe {
+		if got := parseSystemd(SystemdUnit(exe, nil)); got != exe {
 			t.Errorf("systemd: %q read back as %q", exe, got)
 		}
 		if got := parseDesktop(DesktopEntry(exe)); got != exe {
 			t.Errorf("desktop: %q read back as %q", exe, got)
 		}
-		if got := parsePlist(LaunchdPlist(exe, "/tmp/log")); got != exe {
+		if got := parsePlist(LaunchdPlist(exe, "/tmp/log", nil)); got != exe {
 			t.Errorf("plist: %q read back as %q", exe, got)
 		}
 	}
@@ -294,7 +307,7 @@ func TestAUnitFileLeftBehindKeepsSystemd(t *testing.T) {
 	// The session no longer answers, but off must still clean up the unit.
 	e := newEnv(t, "linux")
 	e.noSystemd()
-	if err := writeFile(e.m.unitPath(), SystemdUnit(e.m.Exe)); err != nil {
+	if err := writeFile(e.m.unitPath(), SystemdUnit(e.m.Exe, nil)); err != nil {
 		t.Fatal(err)
 	}
 	st, err := e.m.Status()
@@ -312,8 +325,8 @@ func TestSystemdEnable(t *testing.T) {
 	if err := e.m.Enable(); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(e.m.Config, "systemd", "user", "lazykuma-watch.service")
-	if got := readString(t, path); got != SystemdUnit(e.m.Exe) {
+	path := filepath.Join(e.m.Home, ".config", "systemd", "user", "lazykuma-watch.service")
+	if got := readString(t, path); got != SystemdUnit(e.m.Exe, nil) {
 		t.Fatalf("unit:\n%s", got)
 	}
 	if fi, err := os.Stat(path); runtime.GOOS != "windows" && (err != nil || fi.Mode().Perm() != 0o644) {
@@ -446,7 +459,6 @@ func TestXDGDisable(t *testing.T) {
 	if err := e.m.Enable(); err != nil {
 		t.Fatal(err)
 	}
-	e.hold()
 	if err := e.m.Disable(); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +505,7 @@ func TestLaunchdEnable(t *testing.T) {
 	}
 	plist := filepath.Join(e.m.Home, "Library", "LaunchAgents", "io.github.icortesb.lazykuma.watch.plist")
 	logPath := filepath.Join(e.m.Home, "Library", "Logs", "lazykuma", "watch.log")
-	if got := readString(t, plist); got != LaunchdPlist(e.m.Exe, logPath) {
+	if got := readString(t, plist); got != LaunchdPlist(e.m.Exe, logPath, nil) {
 		t.Fatalf("plist:\n%s", got)
 	}
 	if fi, err := os.Stat(filepath.Dir(logPath)); err != nil || !fi.IsDir() {
@@ -512,7 +524,37 @@ func TestLaunchdEnable(t *testing.T) {
 	}
 }
 
+// fastBootstrap makes the bootstrap retries quick.
+func fastBootstrap(t *testing.T) {
+	bootstrapWait, bootstrapRetry = 200*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { bootstrapWait, bootstrapRetry = 5*time.Second, 250*time.Millisecond })
+}
+
+func TestLaunchdEnableRetriesWhileTheOldJobGoes(t *testing.T) {
+	fastBootstrap(t)
+	for _, code := range []int{5, 37} {
+		e := newEnv(t, "darwin")
+		bootstrap := "launchctl bootstrap gui/501 " + e.m.plistPath()
+		e.seq[bootstrap] = []error{exitError(code), exitError(code)}
+		if err := e.m.Enable(); err != nil {
+			t.Fatalf("exit %d: Enable = %v", code, err)
+		}
+		e.wantCalls("launchctl bootout gui/501/io.github.icortesb.lazykuma.watch", bootstrap, bootstrap, bootstrap)
+	}
+}
+
+func TestLaunchdEnableDoesNotRetryOtherFailures(t *testing.T) {
+	e := newEnv(t, "darwin")
+	bootstrap := "launchctl bootstrap gui/501 " + e.m.plistPath()
+	e.fail[bootstrap] = exitError(1)
+	if err := e.m.Enable(); err == nil {
+		t.Fatal("Enable succeeded")
+	}
+	e.wantCalls("launchctl bootout gui/501/io.github.icortesb.lazykuma.watch", bootstrap)
+}
+
 func TestLaunchdEnableFails(t *testing.T) {
+	fastBootstrap(t)
 	e := newEnv(t, "darwin")
 	e.fail["launchctl bootstrap gui/501 "+e.m.plistPath()] = exitError(5)
 	e.out["launchctl bootstrap gui/501 "+e.m.plistPath()] = "Bootstrap failed: 5: Input/output error\n"
@@ -570,7 +612,7 @@ func TestWindowsEnableReplacesTheRunningWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Status{On: true, Kind: KindRunKey, Path: e.m.Exe}
+	want := Status{On: true, Kind: KindRunKey, Path: e.m.Exe, Running: true, PID: os.Getpid()}
 	if st != want {
 		t.Fatalf("Status = %+v, want %+v", st, want)
 	}
@@ -581,7 +623,6 @@ func TestWindowsDisable(t *testing.T) {
 	if err := e.m.Enable(); err != nil {
 		t.Fatal(err)
 	}
-	e.hold()
 	if err := e.m.Disable(); err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +663,151 @@ func TestDefault(t *testing.T) {
 	if m.Run == nil || m.Start == nil || m.Stop == nil {
 		t.Fatal("a seam is missing")
 	}
+	want := map[string]string{"XDG_CONFIG_HOME": filepath.Join(dir, "config"), "XDG_STATE_HOME": filepath.Join(dir, "state")}
+	if !maps.Equal(m.Env, want) {
+		t.Fatalf("Env = %v, want %v", m.Env, want)
+	}
 	if (m.Registry != nil) != (runtime.GOOS == "windows") {
 		t.Fatalf("Registry = %v on %s", m.Registry, runtime.GOOS)
+	}
+}
+
+func TestSystemdUnitSetsTheCallersXDGDirectories(t *testing.T) {
+	got := SystemdUnit("/usr/bin/lazykuma", map[string]string{
+		"XDG_STATE_HOME":  "/home/me/state",
+		"XDG_CONFIG_HOME": `/home/me/my "cfg"/100%/$x`,
+	})
+	want := `[Service]
+Environment="XDG_CONFIG_HOME=/home/me/my \"cfg\"/100%%/$x"
+Environment="XDG_STATE_HOME=/home/me/state"
+ExecStart="/usr/bin/lazykuma" watch
+`
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if parseSystemd(got) != "/usr/bin/lazykuma" {
+		t.Fatalf("ExecStart read back as %q", parseSystemd(got))
+	}
+}
+
+func TestLaunchdPlistSetsTheCallersXDGDirectories(t *testing.T) {
+	got := LaunchdPlist("/usr/bin/lazykuma", "/tmp/log", map[string]string{
+		"XDG_STATE_HOME":  "/Users/me/state",
+		"XDG_CONFIG_HOME": "/Users/me/a&b",
+	})
+	want := `		<string>watch</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>XDG_CONFIG_HOME</key>
+		<string>/Users/me/a&amp;b</string>
+		<key>XDG_STATE_HOME</key>
+		<string>/Users/me/state</string>
+	</dict>
+	<key>RunAtLoad</key>
+`
+	if !strings.Contains(got, want) {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+	if parsePlist(got) != "/usr/bin/lazykuma" {
+		t.Fatalf("ProgramArguments read back as %q", parsePlist(got))
+	}
+}
+
+func TestSystemdEnableWritesTheManagersEnvironment(t *testing.T) {
+	e := newEnv(t, "linux")
+	e.m.Env = map[string]string{"XDG_CONFIG_HOME": e.m.Config}
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readString(t, e.m.unitPath()); got != SystemdUnit(e.m.Exe, e.m.Env) {
+		t.Fatalf("unit:\n%s", got)
+	}
+	if strings.HasPrefix(e.m.unitPath(), e.m.Config) {
+		t.Fatalf("unit under XDG_CONFIG_HOME: %s", e.m.unitPath())
+	}
+}
+
+func TestLaunchdEnableWritesTheManagersEnvironment(t *testing.T) {
+	e := newEnv(t, "darwin")
+	e.m.Env = map[string]string{"XDG_STATE_HOME": "/Users/me/state"}
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(e.m.Home, "Library", "Logs", "lazykuma", "watch.log")
+	if got := readString(t, e.m.plistPath()); got != LaunchdPlist(e.m.Exe, logPath, e.m.Env) {
+		t.Fatalf("plist:\n%s", got)
+	}
+}
+
+// xdgThenSystemd registers with XDG autostart while systemd does not answer,
+// then lets it answer.
+func xdgThenSystemd(t *testing.T) *env {
+	e := newEnv(t, "linux")
+	e.noSystemd()
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	delete(e.fail, "systemctl --user show-environment")
+	e.calls, e.events, e.starts, e.stops = nil, nil, nil, nil
+	return e
+}
+
+func TestAnXDGEntryStaysOnOnceSystemdAnswers(t *testing.T) {
+	e := xdgThenSystemd(t)
+	st, err := e.m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Kind != KindXDG || !st.On || st.Path != e.m.Exe {
+		t.Fatalf("Status = %+v", st)
+	}
+}
+
+func TestSystemdEnableRemovesAnXDGEntry(t *testing.T) {
+	e := xdgThenSystemd(t)
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	wantGone(t, e.m.desktopPath())
+	if len(e.stops) != 0 || len(e.starts) != 0 {
+		t.Fatalf("stops %v, starts %q", e.stops, e.starts)
+	}
+	st, err := e.m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Kind != KindSystemd || !st.On {
+		t.Fatalf("Status = %+v", st)
+	}
+}
+
+func TestSystemdDisableRemovesAnXDGEntry(t *testing.T) {
+	e := newEnv(t, "linux")
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(e.m.desktopPath(), DesktopEntry(e.m.Exe)); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.Disable(); err != nil {
+		t.Fatal(err)
+	}
+	wantGone(t, e.m.unitPath())
+	wantGone(t, e.m.desktopPath())
+}
+
+func TestAWatchThatExitsAtOnceIsReported(t *testing.T) {
+	startWait = 100 * time.Millisecond
+	defer func() { startWait = 2 * time.Second }()
+	for _, goos := range []string{"linux", "windows"} {
+		e := newEnv(t, goos)
+		e.noSystemd()
+		e.startDies = true
+		err := e.m.Enable()
+		want := "watch exited right after starting; see " + e.m.LogPath
+		if err == nil || err.Error() != want {
+			t.Fatalf("%s: Enable = %v, want %q", goos, err, want)
+		}
 	}
 }

@@ -40,7 +40,7 @@ func startHelper(t *testing.T, ignoreTerm bool) (pid int, lock string) {
 	if ignoreTerm {
 		t.Setenv("AUTOSTART_HELPER_IGNORE_TERM", "1")
 	}
-	if err := startDetached([]string{os.Args[0], "-test.run=^TestHelperWatch$"}); err != nil {
+	if err := startDetached(t.TempDir(), []string{os.Args[0], "-test.run=^TestHelperWatch$"}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)

@@ -2,22 +2,28 @@ package autostart
 
 import (
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
 const unitName = "lazykuma-watch.service"
 
-// SystemdUnit is the user service that runs the watch. Its output goes to
-// the journal, so it does not pass --log.
-func SystemdUnit(exe string) string {
+// SystemdUnit is the user service that runs the watch, with env set for it.
+// Its output goes to the journal, so it does not pass --log.
+func SystemdUnit(exe string, env map[string]string) string {
+	var envLines strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		envLines.WriteString("Environment=" + systemdQuoteEnv(k+"="+env[k]) + "\n")
+	}
 	return `[Unit]
 Description=lazykuma watch: Uptime Kuma alerts
 After=network-online.target
 
 [Service]
-ExecStart=` + systemdQuote(exe) + ` watch
+` + envLines.String() + `ExecStart=` + systemdQuote(exe) + ` watch
 Restart=on-failure
 RestartSec=30
 
@@ -31,6 +37,12 @@ WantedBy=default.target
 // variables, so both are doubled.
 func systemdQuote(s string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`, `$`, `$$`).Replace(s) + `"`
+}
+
+// systemdQuoteEnv quotes an Environment= assignment. systemd expands %
+// specifiers there too, but not $ variables.
+func systemdQuoteEnv(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s) + `"`
 }
 
 // parseSystemd returns the binary of the unit's ExecStart, or "".
@@ -71,8 +83,10 @@ func firstWord(s string) string {
 
 type systemd struct{ m *Manager }
 
+// unitPath is in ~/.config whatever XDG_CONFIG_HOME says: the user manager
+// is started without the caller's environment and looks there.
 func (m *Manager) unitPath() string {
-	return filepath.Join(m.Config, "systemd", "user", unitName)
+	return filepath.Join(m.Home, ".config", "systemd", "user", unitName)
 }
 
 func (systemd) kind() string { return KindSystemd }
@@ -86,7 +100,12 @@ func (s systemd) registered() (bool, string, error) {
 }
 
 func (s systemd) enable() error {
-	if err := writeFile(s.m.unitPath(), SystemdUnit(s.m.Exe)); err != nil {
+	if err := writeFile(s.m.unitPath(), SystemdUnit(s.m.Exe, s.m.Env)); err != nil {
+		return err
+	}
+	// An XDG entry from a time systemd did not answer would start a second
+	// watch at login.
+	if err := removeFile(s.m.desktopPath()); err != nil {
 		return err
 	}
 	for _, verb := range [][]string{{"daemon-reload"}, {"enable", unitName}, {"restart", unitName}} {
@@ -107,6 +126,9 @@ func (s systemd) disable() error {
 		}
 	}
 	if err := removeFile(path); err != nil {
+		return err
+	}
+	if err := removeFile(s.m.desktopPath()); err != nil {
 		return err
 	}
 	return s.m.run("systemctl", "--user", "daemon-reload")

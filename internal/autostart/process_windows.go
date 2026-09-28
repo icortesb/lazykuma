@@ -11,9 +11,11 @@ import (
 
 // startDetached starts argv with no console window and out of this
 // console's process group, so closing the terminal lazykuma runs in does
-// not end it.
-func startDetached(argv []string) error {
+// not end it, and in dir, the home directory, so it does not keep the
+// directory lazykuma was started in busy.
+func startDetached(dir string, argv []string) error {
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = dir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_NO_WINDOW,
 		HideWindow:    true,
