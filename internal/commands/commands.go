@@ -71,6 +71,11 @@ func Watch(ctx context.Context, src WatchSource, sender notify.Sender, out io.Wr
 		case u := <-updates:
 			w.observe(u.Instance)
 		case <-tick.C:
+			// After a failed reload there is no core to ask; the instances
+			// waiting out their grace period are rechecked once one loads.
+			if w.c == nil {
+				continue
+			}
 			for _, name := range w.tracker.Waiting() {
 				w.observe(name)
 			}

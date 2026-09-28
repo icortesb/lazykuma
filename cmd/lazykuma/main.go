@@ -79,6 +79,12 @@ func open(ctx context.Context) (*core.Core, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openAt(ctx, cfgPath, tokPath)
+}
+
+// openAt reads the config and tokens at these paths and starts every
+// instance under ctx.
+func openAt(ctx context.Context, cfgPath, tokPath string) (*core.Core, error) {
 	c, err := core.Open(cfgPath, tokPath, core.Options{})
 	if err != nil {
 		return nil, err
@@ -153,14 +159,7 @@ func watch(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, err)
 	}
 	src := commands.WatchSource{
-		Open: func(ctx context.Context) (*core.Core, error) {
-			c, err := core.Open(cfgPath, tokPath, core.Options{})
-			if err != nil {
-				return nil, err
-			}
-			c.Run(ctx)
-			return c, nil
-		},
+		Open:  func(ctx context.Context) (*core.Core, error) { return openAt(ctx, cfgPath, tokPath) },
 		Stamp: func() string { return config.Stamp(cfgPath, tokPath) },
 	}
 

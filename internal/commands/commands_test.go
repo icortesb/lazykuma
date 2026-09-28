@@ -748,3 +748,79 @@ func TestWatchReloadErrorIsRetriedOnTheNextChange(t *testing.T) {
 	stamp.Add(1)
 	eventually(t, "the header again", func() bool { return strings.Count(out.String(), "watching home;") == 2 })
 }
+
+func TestWatchFailedReloadKeepsTheGracePeriodWaiting(t *testing.T) {
+	// An instance inside its grace period is rechecked on every tick; a
+	// reload that fails leaves no core to recheck it against, and that
+	// must neither crash nor lose it.
+	defer func(d time.Duration) { recheck = d }(recheck)
+	recheck = 20 * time.Millisecond
+
+	var refuse atomic.Bool
+	login := kumatest.Login(false)
+	f := kumatest.New(t, func(event string, args []json.RawMessage) any {
+		if event == "loginByToken" && refuse.Load() {
+			return map[string]any{"ok": false, "msg": "authInvalidToken", "msgi18n": true}
+		}
+		return login(event, args)
+	})
+	c, _ := running(t, "", "spare")
+	if _, err := c.Add(config.Instance{Name: "home", URL: f.URL()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetToken("home", f.URL(), "jwt"); err != nil {
+		t.Fatal(err)
+	}
+
+	var stamp, opens atomic.Int64
+	src := WatchSource{
+		Open: func(context.Context) (*core.Core, error) {
+			if opens.Add(1) == 2 {
+				return nil, errors.New("config unreadable")
+			}
+			return c, nil
+		},
+		Stamp: func() string { return fmt.Sprint(stamp.Load()) },
+		Poll:  20 * time.Millisecond,
+	}
+	var clock atomic.Int64
+	clock.Store(t0.UnixNano())
+	now := func() time.Time { return time.Unix(0, clock.Load()) }
+	var out syncBuffer
+	sender := &recorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- Watch(ctx, src, sender, &out, now) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+
+	waitConnected(t, c, "home")
+	monitors(f, map[int]string{1: "web"})
+	eventually(t, "the monitor list", func() bool {
+		in, _ := c.Instance("home")
+		return in.State().Listed
+	})
+	time.Sleep(100 * time.Millisecond)
+	refuse.Store(true)
+	f.Drop()
+	eventually(t, "the refusal printed", func() bool { return strings.Contains(out.String(), "home: bad cred") })
+
+	stamp.Add(1)
+	eventually(t, "the reload error", func() bool { return strings.Contains(out.String(), "lazykuma: config unreadable\n") })
+	time.Sleep(100 * time.Millisecond) // several ticks with no core
+	clock.Add(int64(notify.Grace))
+	time.Sleep(100 * time.Millisecond)
+	if len(sender.all()) != 0 {
+		t.Fatalf("reported with no core loaded: %v", sender.all())
+	}
+
+	stamp.Add(1)
+	eventually(t, "the notification after the good reload", func() bool { return len(sender.all()) == 1 })
+	if got := sender.all()[0]; got != "✖ home is unreachable | Kuma refused the login token; log in again" {
+		t.Fatalf("sent %q", got)
+	}
+}
