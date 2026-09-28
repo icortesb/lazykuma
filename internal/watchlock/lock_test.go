@@ -182,3 +182,38 @@ func TestALockOnAnUnlinkedFileDoesNotCount(t *testing.T) {
 		t.Fatalf("Holder = %d, %v, %v", pid, running, err)
 	}
 }
+
+func TestAcquireWaitOutlastsABriefHolder(t *testing.T) {
+	path := lockPath(t)
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		l.Release()
+	}()
+	l2, err := AcquireWait(path, time.Second)
+	if err != nil {
+		t.Fatalf("AcquireWait = %v", err)
+	}
+	l2.Release()
+}
+
+func TestAcquireWaitGivesUpOnAHolderThatStays(t *testing.T) {
+	path := lockPath(t)
+	l, err := Acquire(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	start := time.Now()
+	_, err = AcquireWait(path, 300*time.Millisecond)
+	var run ErrRunning
+	if !errors.As(err, &run) || run.PID != os.Getpid() {
+		t.Fatalf("AcquireWait = %v, want ErrRunning{%d}", err, os.Getpid())
+	}
+	if d := time.Since(start); d < 300*time.Millisecond {
+		t.Fatalf("gave up after %v", d)
+	}
+}

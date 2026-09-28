@@ -241,7 +241,11 @@ func (m *Manager) startWatch(argv []string) error {
 	}
 	deadline := time.Now().Add(startWait)
 	for {
-		if _, running, err := watchlock.Holder(m.LockPath); err == nil && running {
+		_, running, err := watchlock.Holder(m.LockPath)
+		if err != nil {
+			return err
+		}
+		if running {
 			return nil
 		}
 		if time.Now().After(deadline) {

@@ -770,9 +770,18 @@ func TestSystemdEnableRemovesAnXDGEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantGone(t, e.m.desktopPath())
-	if len(e.stops) != 0 || len(e.starts) != 0 {
+	// The watch the entry started goes, or the service would fail to take
+	// the lock for the rest of the session.
+	if !slices.Equal(e.stops, []int{os.Getpid()}) || len(e.starts) != 0 {
 		t.Fatalf("stops %v, starts %q", e.stops, e.starts)
 	}
+	e.wantEvents(
+		"systemctl --user show-environment",
+		"stop",
+		"systemctl --user daemon-reload",
+		"systemctl --user enable lazykuma-watch.service",
+		"systemctl --user restart lazykuma-watch.service",
+	)
 	st, err := e.m.Status()
 	if err != nil {
 		t.Fatal(err)
@@ -790,11 +799,29 @@ func TestSystemdDisableRemovesAnXDGEntry(t *testing.T) {
 	if err := writeFile(e.m.desktopPath(), DesktopEntry(e.m.Exe)); err != nil {
 		t.Fatal(err)
 	}
+	e.hold()
 	if err := e.m.Disable(); err != nil {
 		t.Fatal(err)
 	}
 	wantGone(t, e.m.unitPath())
 	wantGone(t, e.m.desktopPath())
+	if !slices.Equal(e.stops, []int{os.Getpid()}) {
+		t.Fatalf("stops = %v", e.stops)
+	}
+}
+
+func TestSystemdLeavesAWatchAloneWithoutAnXDGEntry(t *testing.T) {
+	e := newEnv(t, "linux")
+	e.hold()
+	if err := e.m.Enable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.m.Disable(); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.stops) != 0 {
+		t.Fatalf("stops = %v", e.stops)
+	}
 }
 
 func TestAWatchThatExitsAtOnceIsReported(t *testing.T) {

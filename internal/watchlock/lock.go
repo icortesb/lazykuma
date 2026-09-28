@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // ErrRunning is returned by Acquire when another process holds the lock.
@@ -50,6 +51,21 @@ func Acquire(path string) (*Lock, error) {
 		return nil, err
 	}
 	return &Lock{f: f, path: path}, nil
+}
+
+// AcquireWait is Acquire that keeps trying for up to wait while the lock is
+// held. Holder probes by taking the lock for an instant, so a watch starting
+// while someone asks for its status can find it held; waiting absorbs that,
+// and a real holder still yields ErrRunning once wait has passed.
+func AcquireWait(path string, wait time.Duration) (*Lock, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		l, err := Acquire(path)
+		if !errors.As(err, new(ErrRunning)) || time.Now().After(deadline) {
+			return l, err
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // Release unlocks, closes and removes the file. The file is closed before it

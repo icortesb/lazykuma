@@ -103,9 +103,7 @@ func (s systemd) enable() error {
 	if err := writeFile(s.m.unitPath(), SystemdUnit(s.m.Exe, s.m.Env)); err != nil {
 		return err
 	}
-	// An XDG entry from a time systemd did not answer would start a second
-	// watch at login.
-	if err := removeFile(s.m.desktopPath()); err != nil {
+	if err := s.removeXDG(); err != nil {
 		return err
 	}
 	for _, verb := range [][]string{{"daemon-reload"}, {"enable", unitName}, {"restart", unitName}} {
@@ -128,8 +126,23 @@ func (s systemd) disable() error {
 	if err := removeFile(path); err != nil {
 		return err
 	}
-	if err := removeFile(s.m.desktopPath()); err != nil {
+	if err := s.removeXDG(); err != nil {
 		return err
 	}
 	return s.m.run("systemctl", "--user", "daemon-reload")
+}
+
+// removeXDG removes an XDG entry written at a time systemd did not answer,
+// which would start a second watch at login, and stops the watch it started:
+// holding the lock, it would keep the service failing for the rest of the
+// session.
+func (s systemd) removeXDG() error {
+	path := s.m.desktopPath()
+	if !exists(path) {
+		return nil
+	}
+	if err := removeFile(path); err != nil {
+		return err
+	}
+	return s.m.stopHolder()
 }

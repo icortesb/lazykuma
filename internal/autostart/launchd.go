@@ -15,10 +15,9 @@ import (
 const launchdLabel = "io.github.icortesb.lazykuma.watch"
 
 // LaunchdPlist is the launch agent that runs the watch, with env set for it.
-// launchd writes its
-// output to logPath itself, so it does not pass --log. KeepAlive restarts it
-// when it fails, a watch that found another one running included: that one
-// takes over when the other stops.
+// launchd writes its output to logPath itself, so it does not pass --log.
+// KeepAlive restarts it when it fails, a watch that found another one running
+// included: that one takes over when the other stops.
 func LaunchdPlist(exe, logPath string, env map[string]string) string {
 	var envDict strings.Builder
 	if len(env) > 0 {
