@@ -143,6 +143,11 @@ func NewTracker(on string) *Tracker {
 	}
 }
 
+// SetOn changes what the tracker notifies on, as NewTracker's on does,
+// keeping what it already saw: a watch whose config changed under it must
+// follow the new setting without reporting ongoing outages again.
+func (t *Tracker) SetOn(on string) { t.on = on }
+
 // Waiting is the instances seen unreachable but not reported yet. A refused
 // token stops the reconnect attempts, so no further update may come to
 // carry one past Grace: whoever feeds the tracker must observe these again.

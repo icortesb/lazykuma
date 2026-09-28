@@ -344,22 +344,80 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// seen is what Watch has finished with, so a test waits for Watch itself
+// rather than for a while: once it has seen a state, whatever that state
+// was going to send has been sent.
+type seen struct {
+	mu    sync.Mutex
+	last  map[string]state.Instance
+	ticks int
+}
+
+// source is src reporting to s.
+func (s *seen) source(src WatchSource) WatchSource {
+	src.observed = func(name string, st state.Instance) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.last == nil {
+			s.last = map[string]state.Instance{}
+		}
+		s.last[name] = st
+	}
+	src.ticked = func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.ticks++
+	}
+	return src
+}
+
+// until waits for Watch to have seen name in a state that satisfies cond.
+func (s *seen) until(t *testing.T, what, name string, cond func(state.Instance) bool) {
+	t.Helper()
+	eventually(t, what, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		st, ok := s.last[name]
+		return ok && cond(st)
+	})
+}
+
+// ticked waits for n more recheck ticks.
+func (s *seen) ticked(t *testing.T, n int) {
+	t.Helper()
+	s.mu.Lock()
+	want := s.ticks + n
+	s.mu.Unlock()
+	eventually(t, fmt.Sprint(n, " ticks"), func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.ticks >= want
+	})
+}
+
+// beatAt is whether monitor id's last beat is the one beat pushed at second.
+func beatAt(id, second int) func(state.Instance) bool {
+	return func(st state.Instance) bool {
+		b, ok := st.Monitors[id].Last()
+		return ok && b.Time.Second() == second
+	}
+}
+
+func listed(st state.Instance) bool { return st.Listed }
+
 func TestWatchReportsAnOutageOnce(t *testing.T) {
 	c, fakes := running(t, "", "home")
 	var out syncBuffer
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, fixed(c), sender, &out, func() time.Time { return t0 }) }()
+	w := &seen{}
+	go func() { done <- Watch(ctx, w.source(fixed(c)), sender, &out, func() time.Time { return t0 }) }()
 
 	waitConnected(t, c, "home")
 	monitors(fakes["home"], map[int]string{1: "web"})
 	beat(fakes["home"], 1, 1, 1, "200 - OK") // the starting point: no alert
-	eventually(t, "the first beat", func() bool {
-		in, _ := c.Instance("home")
-		return in.State().Monitors[1].Status() == state.StatusUp
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the first beat", "home", beatAt(1, 1))
 	if len(sender.all()) != 0 {
 		t.Fatalf("the starting point raised %v", sender.all())
 	}
@@ -375,7 +433,7 @@ func TestWatchReportsAnOutageOnce(t *testing.T) {
 
 	// Recoveries are off by default.
 	beat(fakes["home"], 1, 1, 3, "200 - OK")
-	time.Sleep(200 * time.Millisecond)
+	w.until(t, "the recovery", "home", beatAt(1, 3))
 	if len(sender.all()) != 1 {
 		t.Errorf("a recovery was sent with notify.on = down: %v", sender.all())
 	}
@@ -392,16 +450,13 @@ func TestWatchPrintsOnlyWhenNotificationsAreOff(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Watch(ctx, fixed(c), sender, &out, func() time.Time { return t0 })
+	w := &seen{}
+	go Watch(ctx, w.source(fixed(c)), sender, &out, func() time.Time { return t0 })
 
 	waitConnected(t, c, "home")
 	monitors(fakes["home"], map[int]string{1: "web"})
 	beat(fakes["home"], 1, 0, 1, "down")
-	eventually(t, "the baseline", func() bool {
-		in, _ := c.Instance("home")
-		return in.State().Monitors[1].Status() == state.StatusDown
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the baseline", "home", beatAt(1, 1))
 	beat(fakes["home"], 1, 1, 2, "200 - OK")
 	eventually(t, "the recovery line", func() bool { return strings.Contains(out.String(), "back  home / web") })
 	if len(sender.all()) != 0 {
@@ -442,23 +497,17 @@ func TestWatchReportsARefusedTokenAfterTheGracePeriod(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go Watch(ctx, fixed(c), sender, &out, now)
+	w := &seen{}
+	go Watch(ctx, w.source(fixed(c)), sender, &out, now)
 
 	waitConnected(t, c, "home")
 	monitors(f, map[int]string{1: "web"})
-	eventually(t, "the monitor list", func() bool {
-		in, _ := c.Instance("home")
-		return in.State().Listed
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the monitor list", "home", listed)
 
 	refuse.Store(true)
 	f.Drop()
-	eventually(t, "the refusal", func() bool {
-		in, _ := c.Instance("home")
-		return in.State().Conn == state.ConnBadCred
-	})
-	time.Sleep(100 * time.Millisecond) // Watch has seen it: the clock starts
+	// Once Watch has seen the refusal, the clock starts.
+	w.until(t, "the refusal", "home", func(st state.Instance) bool { return st.Conn == state.ConnBadCred })
 	if len(sender.all()) != 0 {
 		t.Fatalf("reported before the grace period: %v", sender.all())
 	}
@@ -569,6 +618,16 @@ func (f *files) connected(t *testing.T, old *core.Core, name string) *core.Core 
 	return c
 }
 
+// reloaded waits for Watch to print header, and returns the core it opened
+// last. Adding an instance writes the tokens and then the config, and a
+// reload may land between the two: only the header shows which core is the
+// final one.
+func (f *files) reloaded(t *testing.T, out *syncBuffer, header string) *core.Core {
+	t.Helper()
+	eventually(t, "the header "+header, func() bool { return strings.Contains(out.String(), "  "+header) })
+	return f.core()
+}
+
 // watching runs Watch on src until the test ends.
 func watching(t *testing.T, src WatchSource, sender notify.Sender, out io.Writer) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -587,25 +646,24 @@ func TestWatchReloadPicksUpAnAddedInstance(t *testing.T) {
 	f.add(t, "home")
 	var out syncBuffer
 	sender := &recorder{}
-	watching(t, f.source(), sender, &out)
-	first := f.connected(t, nil, "home")
-	eventually(t, "the header", func() bool { return strings.Contains(out.String(), "watching home; notifying on outages\n") })
+	w := &seen{}
+	watching(t, w.source(f.source()), sender, &out)
+	f.connected(t, nil, "home")
+	eventually(t, "the header", func() bool {
+		return strings.Contains(out.String(), t0.Local().Format("2006-01-02 15:04:05")+"  watching home; notifying on outages\n")
+	})
 
 	away := f.add(t, "away")
-	c := f.connected(t, first, "away")
-	eventually(t, "the new header", func() bool {
-		return strings.Contains(out.String(), "config changed; reloading\n") &&
-			strings.Contains(out.String(), "watching home, away; notifying on outages\n")
-	})
+	c := f.reloaded(t, &out, "watching home, away; notifying on outages\n")
+	if !strings.Contains(out.String(), t0.Local().Format("2006-01-02 15:04:05")+"  config changed; reloading\n") {
+		t.Errorf("the reload was not printed: %q", out.String())
+	}
+	waitConnected(t, c, "away")
 
 	// The new instance is watched: its outage is reported.
 	monitors(away, map[int]string{1: "db"})
 	beat(away, 1, 1, 1, "OK")
-	eventually(t, "the first beat", func() bool {
-		in, _ := c.Instance("away")
-		return in.State().Monitors[1].Status() == state.StatusUp
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the first beat", "away", beatAt(1, 1))
 	beat(away, 1, 0, 2, "timeout")
 	eventually(t, "the notification", func() bool { return len(sender.all()) == 1 })
 	if got := sender.all()[0]; got != "✖ db is down | on away · timeout" {
@@ -640,31 +698,26 @@ func TestWatchReloadDoesNotReportAnOngoingOutageAgain(t *testing.T) {
 	home := f.add(t, "home")
 	var out syncBuffer
 	sender := &recorder{}
-	watching(t, f.source(), sender, &out)
-	first := f.connected(t, nil, "home")
+	w := &seen{}
+	watching(t, w.source(f.source()), sender, &out)
+	f.connected(t, nil, "home")
 
 	monitors(home, map[int]string{1: "web", 2: "api"})
 	beat(home, 1, 1, 1, "OK")
-	eventually(t, "the first beat", func() bool {
-		in, _ := first.Instance("home")
-		return in.State().Monitors[1].Status() == state.StatusUp
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the first beat", "home", beatAt(1, 1))
 	beat(home, 1, 0, 2, "timeout")
 	eventually(t, "the notification", func() bool { return len(sender.all()) == 1 })
 
 	// Any write reloads; nothing about home changed.
 	f.add(t, "spare")
-	c := f.connected(t, first, "home")
+	c := f.reloaded(t, &out, "watching home, spare;")
+	waitConnected(t, c, "home")
 	monitors(home, map[int]string{1: "web", 2: "api"})
 	beat(home, 1, 0, 3, "timeout")
 	beat(home, 2, 1, 3, "OK")
-	eventually(t, "the beats after the reload", func() bool {
-		in, _ := c.Instance("home")
-		st := in.State()
-		return st.Monitors[1].Status() == state.StatusDown && st.Monitors[2].Status() == state.StatusUp
+	w.until(t, "the beats after the reload", "home", func(st state.Instance) bool {
+		return beatAt(1, 3)(st) && beatAt(2, 3)(st)
 	})
-	time.Sleep(100 * time.Millisecond)
 
 	// A new outage is still reported, and by then web's state after the
 	// reload has been seen: it must not have been reported again.
@@ -675,6 +728,46 @@ func TestWatchReloadDoesNotReportAnOngoingOutageAgain(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), "home: ok"); n != 1 {
 		t.Errorf("home's connection printed %d times across the reload: %q", n, out.String())
+	}
+}
+
+func TestWatchReloadFollowsNotifyOn(t *testing.T) {
+	f := newFiles(t)
+	home := f.add(t, "home")
+	var out syncBuffer
+	sender := &recorder{}
+	w := &seen{}
+	watching(t, w.source(f.source()), sender, &out)
+	first := f.connected(t, nil, "home")
+
+	monitors(home, map[int]string{1: "web"})
+	beat(home, 1, 1, 1, "OK")
+	w.until(t, "the first beat", "home", beatAt(1, 1))
+	beat(home, 1, 0, 2, "timeout")
+	eventually(t, "the outage", func() bool { return len(sender.all()) == 1 })
+
+	cfg, _, err := config.Load(f.cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Notify.On = config.NotifyChanges
+	if err := config.Save(f.cfgPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	c := f.reloaded(t, &out, "watching home; notifying on outages and recoveries\n")
+	if c == first {
+		t.Fatal("the change did not reload")
+	}
+	waitConnected(t, c, "home")
+
+	// The recovery is news under the new setting.
+	monitors(home, map[int]string{1: "web"})
+	beat(home, 1, 0, 3, "timeout")
+	w.until(t, "the outage after the reload", "home", beatAt(1, 3))
+	beat(home, 1, 1, 4, "OK")
+	eventually(t, "the recovery", func() bool { return len(sender.all()) == 2 })
+	if got := sender.all()[1]; !strings.HasPrefix(got, "✔ web is back") {
+		t.Fatalf("sent %v", sender.all())
 	}
 }
 
@@ -722,8 +815,7 @@ func TestWatchFirstLoadErrorIsReturned(t *testing.T) {
 
 func TestWatchReloadErrorIsRetriedOnTheNextChange(t *testing.T) {
 	c, _ := running(t, "", "home")
-	var stamp atomic.Int64
-	var opens atomic.Int64
+	var stamp, opens, checks atomic.Int64
 	src := WatchSource{
 		Open: func(context.Context) (*core.Core, error) {
 			if opens.Add(1) == 2 {
@@ -731,8 +823,11 @@ func TestWatchReloadErrorIsRetriedOnTheNextChange(t *testing.T) {
 			}
 			return c, nil
 		},
-		Stamp: func() string { return fmt.Sprint(stamp.Load()) },
-		Poll:  20 * time.Millisecond,
+		Stamp: func() string {
+			checks.Add(1)
+			return fmt.Sprint(stamp.Load())
+		},
+		Poll: 20 * time.Millisecond,
 	}
 	var out syncBuffer
 	watching(t, src, &recorder{}, &out)
@@ -740,7 +835,8 @@ func TestWatchReloadErrorIsRetriedOnTheNextChange(t *testing.T) {
 
 	stamp.Add(1)
 	eventually(t, "the error", func() bool { return strings.Contains(out.String(), "lazykuma: tokens unreadable\n") })
-	time.Sleep(100 * time.Millisecond)
+	after := checks.Load()
+	eventually(t, "more checks", func() bool { return checks.Load() >= after+3 })
 	if n := opens.Load(); n != 2 {
 		t.Fatalf("opened %d times with no change after the error", n)
 	}
@@ -790,7 +886,8 @@ func TestWatchFailedReloadKeepsTheGracePeriodWaiting(t *testing.T) {
 	sender := &recorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Watch(ctx, src, sender, &out, now) }()
+	w := &seen{}
+	go func() { done <- Watch(ctx, w.source(src), sender, &out, now) }()
 	defer func() {
 		cancel()
 		if err := <-done; err != nil {
@@ -800,20 +897,16 @@ func TestWatchFailedReloadKeepsTheGracePeriodWaiting(t *testing.T) {
 
 	waitConnected(t, c, "home")
 	monitors(f, map[int]string{1: "web"})
-	eventually(t, "the monitor list", func() bool {
-		in, _ := c.Instance("home")
-		return in.State().Listed
-	})
-	time.Sleep(100 * time.Millisecond)
+	w.until(t, "the monitor list", "home", listed)
 	refuse.Store(true)
 	f.Drop()
 	eventually(t, "the refusal printed", func() bool { return strings.Contains(out.String(), "home: bad cred") })
 
 	stamp.Add(1)
 	eventually(t, "the reload error", func() bool { return strings.Contains(out.String(), "lazykuma: config unreadable\n") })
-	time.Sleep(100 * time.Millisecond) // several ticks with no core
+	w.ticked(t, 3) // several ticks with no core
 	clock.Add(int64(notify.Grace))
-	time.Sleep(100 * time.Millisecond)
+	w.ticked(t, 3)
 	if len(sender.all()) != 0 {
 		t.Fatalf("reported with no core loaded: %v", sender.all())
 	}

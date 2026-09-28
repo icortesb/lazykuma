@@ -28,6 +28,12 @@ type WatchSource struct {
 	Stamp func() string
 	// Poll is how often Stamp is checked; 10 s when zero.
 	Poll time.Duration
+
+	// observed and ticked, when set, are told of each instance state Watch
+	// has finished with and of each recheck tick, so a test can wait for
+	// Watch rather than for time.
+	observed func(name string, st state.Instance)
+	ticked   func()
 }
 
 // Watch reports every change the tracker finds, one line each on out, and
@@ -46,7 +52,7 @@ func Watch(ctx context.Context, src WatchSource, sender notify.Sender, out io.Wr
 	if poll == 0 {
 		poll = 10 * time.Second
 	}
-	w := &watcher{out: out, sender: sender, now: now, conn: map[string]state.Conn{}}
+	w := &watcher{out: out, sender: sender, now: now, conn: map[string]state.Conn{}, observed: src.observed}
 	stamp := src.Stamp()
 	stop, err := w.load(ctx, src)
 	if err != nil {
@@ -71,6 +77,9 @@ func Watch(ctx context.Context, src WatchSource, sender notify.Sender, out io.Wr
 		case u := <-updates:
 			w.observe(u.Instance)
 		case <-tick.C:
+			if src.ticked != nil {
+				src.ticked()
+			}
 			// After a failed reload there is no core to ask; the instances
 			// waiting out their grace period are rechecked once one loads.
 			if w.c == nil {
@@ -85,7 +94,7 @@ func Watch(ctx context.Context, src WatchSource, sender notify.Sender, out io.Wr
 				continue
 			}
 			stamp = next
-			fmt.Fprintln(out, "config changed; reloading")
+			fmt.Fprintf(out, "%s  config changed; reloading\n", w.stamp())
 			stop()
 			stop = func() {}
 			w.c = nil
@@ -117,6 +126,8 @@ type watcher struct {
 	// word its error differently, and a service left running for days must
 	// not fill the journal with them.
 	conn map[string]state.Conn
+
+	observed func(name string, st state.Instance)
 }
 
 // load opens a core and makes it the one watched. stop ends that core.
@@ -132,10 +143,12 @@ func (w *watcher) load(ctx context.Context, src WatchSource) (stop func(), err e
 	}
 	w.c, w.settings = c, c.Notify()
 	// The tracker is made once: it holds what was already reported, and a
-	// new one would report every ongoing outage again. Its notify.on is
-	// therefore the one read at the first load.
+	// new one would report every ongoing outage again. Only its notify.on
+	// follows the config.
 	if w.tracker == nil {
 		w.tracker = notify.NewTracker(w.settings.On)
+	} else {
+		w.tracker.SetOn(w.settings.On)
 	}
 
 	names := make([]string, 0)
@@ -152,10 +165,10 @@ func (w *watcher) load(ctx context.Context, src WatchSource) (stop func(), err e
 	switch {
 	case len(names) > 0:
 		w.waiting = false
-		fmt.Fprintf(w.out, "watching %s; notifying on %s\n", strings.Join(names, ", "), describe(w.settings))
+		fmt.Fprintf(w.out, "%s  watching %s; notifying on %s\n", w.stamp(), strings.Join(names, ", "), describe(w.settings))
 	case !w.waiting:
 		w.waiting = true
-		fmt.Fprintln(w.out, "no instances configured; waiting for one to be added")
+		fmt.Fprintf(w.out, "%s  no instances configured; waiting for one to be added\n", w.stamp())
 	}
 	return cancel, nil
 }
@@ -171,7 +184,7 @@ func (w *watcher) observe(name string) {
 	st := in.State()
 	if was, seen := w.conn[name]; st.Conn != state.ConnConnecting && (!seen || was != st.Conn) {
 		w.conn[name] = st.Conn
-		fmt.Fprintf(w.out, "%s  %s: %s\n", w.now().Local().Format("2006-01-02 15:04:05"), name, connLine(st))
+		fmt.Fprintf(w.out, "%s  %s: %s\n", w.stamp(), name, connLine(st))
 	}
 	for _, ev := range w.tracker.Observe(name, st, w.now()) {
 		fmt.Fprintln(w.out, ev.Line())
@@ -179,7 +192,14 @@ func (w *watcher) observe(name string) {
 			_ = w.sender.Send(ev.Title(), ev.Body())
 		}
 	}
+	if w.observed != nil {
+		w.observed(name, st)
+	}
 }
+
+// stamp is the time at the head of each line Watch prints, in the format of
+// notify.Event.Line.
+func (w *watcher) stamp() string { return w.now().Local().Format("2006-01-02 15:04:05") }
 
 // connLine is an instance's connection state in words.
 func connLine(st state.Instance) string {
