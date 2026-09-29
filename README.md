@@ -3,21 +3,16 @@
 A terminal UI for [Uptime Kuma](https://github.com/louislam/uptime-kuma) v2. Watch every monitor of
 every instance you run, live, and pause or resume them without opening the browser.
 
-```
- home · 12 monitors · 11 up · 1 down
-╭──────────────────────────────╮╭─────────────────────────────────────────╮
-│ ✖ vaultwarden              — ││ nextcloud                               │
-│ ● nextcloud             42ms ││ https://cloud.home.lan                  │
-│ ● pihole                 3ms ││ up · 99.8% 24h · cert 61 days           │
-│ ‖ backup-s3           paused ││ ping  ▁▂▁▃▂▁▇▂▁▂▃▂▁▁▂▁ 42ms              │
-│                              ││ beats ████████████████████              │
-╰──────────────────────────────╯╰─────────────────────────────────────────╯
-```
+![lazykuma](docs/demo.gif)
+
+Docs and a tour: [icortesb.github.io/lazykuma-web](https://icortesb.github.io/lazykuma-web/).
 
 ## Install
 
 Download a binary for Linux, macOS or Windows (amd64 or arm64) from the
-[releases](https://github.com/icortesb/lazykuma/releases), or:
+[releases](https://github.com/icortesb/lazykuma/releases) — the latest is always at
+`https://github.com/icortesb/lazykuma/releases/latest/download/lazykuma_<os>_<arch>.tar.gz`
+(`.zip` on Windows), for example `lazykuma_linux_amd64.tar.gz` — or:
 
 ```sh
 go install github.com/icortesb/lazykuma/cmd/lazykuma@latest
@@ -68,7 +63,7 @@ starts again from now. Each asks first.
 
 Instances are removed or renamed by editing `~/.config/lazykuma/config.toml` directly; there is no
 menu entry for it yet. Renaming an instance, or changing its URL, means logging in again: the stored
-token is tied to the URL it was issued for, not the name.
+token is kept under the instance's name and only used for the URL it was issued for.
 
 ### Status pages
 
@@ -76,7 +71,7 @@ token is tied to the URL it was issued for, not the name.
 - `n` creates one; the slug follows the title until you type your own
 - `e` edits its title, description, footer, theme, refresh interval, domains and what it shows; everything else the page has (logo, custom CSS, analytics) stays as it is
 - `s` arranges its sections and the monitors in each
-- `i` posts or edits its incident, and `u` takes it down
+- `i` posts or edits its incident, and `u` unpins it (takes it down)
 - `o` opens it in your browser
 - `d` deletes it, after you type its slug
 
@@ -128,8 +123,8 @@ The menu footer says which instances answer: `home ok   vps down   lab no cred`.
 
 ### `lazykuma watch`
 
-Runs until stopped and reports every outage: one line per change on standard output, and a desktop
-notification (D-Bus on Linux, Notification Center on macOS, toasts on Windows). The state each
+Runs until stopped and reports every outage: one line per outage on standard output (recoveries too
+with `on = "changes"`, below), and a desktop notification (D-Bus on Linux, Notification Center on macOS, toasts on Windows). The state each
 monitor has when watch starts is its starting point, so a fresh start never raises an alert per
 monitor. An instance that drops is reported only after 30 seconds unreachable, so a Kuma restart
 does not raise an alert. Every connection change is printed too, including a refused login token,
@@ -248,3 +243,7 @@ make integration   # starts a throwaway Kuma 2 in podman or docker and tests aga
 
 lazykuma talks to Kuma over its Socket.IO API, which it speaks itself over a websocket: see
 `internal/kuma`. `testdata/kuma-v2` holds payloads captured from a real Kuma 2.5.3.
+
+The demo at the top is recorded with [vhs](https://github.com/charmbracelet/vhs) against two
+throwaway Kumas in podman: `demo/demo.sh` in
+[lazykuma-web](https://github.com/icortesb/lazykuma-web/tree/main/demo).
