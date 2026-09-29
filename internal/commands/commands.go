@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -18,62 +19,187 @@ import (
 	"github.com/icortesb/lazykuma/internal/state"
 )
 
+// WatchSource is where Watch gets its core from, and how it notices that
+// the config or the tokens changed under it.
+type WatchSource struct {
+	// Open reads the config and tokens and starts a core under ctx.
+	Open func(ctx context.Context) (*core.Core, error)
+	// Stamp changes whenever the config or tokens change on disk.
+	Stamp func() string
+	// Poll is how often Stamp is checked; 10 s when zero.
+	Poll time.Duration
+
+	// observed and ticked, when set, are told of each instance state Watch
+	// has finished with and of each recheck tick, so a test can wait for
+	// Watch rather than for time.
+	observed func(name string, st state.Instance)
+	ticked   func()
+}
+
 // Watch reports every change the tracker finds, one line each on out, and
 // as a desktop notification when the config's notify.watch says so. It runs
-// until ctx ends. c must already be running.
-func Watch(ctx context.Context, c *core.Core, sender notify.Sender, out io.Writer, now func() time.Time) error {
-	settings := c.Notify()
-	tracker := notify.NewTracker(settings.On)
-
-	names := make([]string, 0)
-	for _, in := range c.Instances() {
-		names = append(names, in.Name())
+// until ctx ends.
+//
+// Watch runs in the background from login, so it must follow what the TUI
+// changes without a restart: when src's stamp changes it stops the core,
+// opens a new one and carries on with the same tracker, so an outage
+// already reported is not reported again. With no instances configured it
+// waits for one to be added rather than exit. Only a failure to open on the
+// first load is returned, so a broken setup still fails loudly in a
+// terminal; later ones are printed and retried on the next change.
+func Watch(ctx context.Context, src WatchSource, sender notify.Sender, out io.Writer, now func() time.Time) error {
+	poll := src.Poll
+	if poll == 0 {
+		poll = 10 * time.Second
 	}
-	if len(names) == 0 {
-		return fmt.Errorf("no instances configured: add one with lazykuma first")
+	w := &watcher{out: out, sender: sender, now: now, conn: map[string]state.Conn{}, observed: src.observed}
+	stamp := src.Stamp()
+	stop, err := w.load(ctx, src)
+	if err != nil {
+		return err
 	}
-	fmt.Fprintf(out, "watching %s; notifying on %s\n", strings.Join(names, ", "), describe(settings))
+	defer func() { stop() }()
 
+	tick := time.NewTicker(recheck)
+	defer tick.Stop()
+	check := time.NewTicker(poll)
+	defer check.Stop()
+	for {
+		// A nil channel never delivers: after a failed reload there is no
+		// core to hear from until the next change.
+		var updates <-chan core.Update
+		if w.c != nil {
+			updates = w.c.Updates()
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case u := <-updates:
+			w.observe(u.Instance)
+		case <-tick.C:
+			if src.ticked != nil {
+				src.ticked()
+			}
+			// After a failed reload there is no core to ask; the instances
+			// waiting out their grace period are rechecked once one loads.
+			if w.c == nil {
+				continue
+			}
+			for _, name := range w.tracker.Waiting() {
+				w.observe(name)
+			}
+		case <-check.C:
+			next := src.Stamp()
+			if next == stamp {
+				continue
+			}
+			stamp = next
+			fmt.Fprintf(out, "%s  config changed; reloading\n", w.stamp())
+			stop()
+			stop = func() {}
+			w.c = nil
+			if stop, err = w.load(ctx, src); err != nil {
+				stop = func() {}
+				fmt.Fprintln(out, "lazykuma:", err)
+			}
+		}
+	}
+}
+
+// watcher is what Watch keeps across reloads.
+type watcher struct {
+	out     io.Writer
+	sender  notify.Sender
+	now     func() time.Time
+	tracker *notify.Tracker
+
+	c        *core.Core
+	settings config.Notify
+	// names are the instances of the current core; waiting is whether the
+	// "no instances" line was printed since the last load that had some.
+	names   []string
+	waiting bool
 	// Every change of connection state is printed, even the ones that are
 	// not worth a notification: a watch that silently lost an instance to
 	// a refused token must still say so somewhere. Only a change of state
 	// counts: each reconnect attempt passes through "connecting" and may
 	// word its error differently, and a service left running for days must
 	// not fill the journal with them.
-	conn := map[string]state.Conn{}
-	observe := func(name string) {
-		in, ok := c.Instance(name)
-		if !ok {
-			tracker.Forget(name)
-			return
-		}
-		st := in.State()
-		if was, seen := conn[name]; st.Conn != state.ConnConnecting && (!seen || was != st.Conn) {
-			conn[name] = st.Conn
-			fmt.Fprintf(out, "%s  %s: %s\n", now().Local().Format("2006-01-02 15:04:05"), name, connLine(st))
-		}
-		for _, ev := range tracker.Observe(name, st, now()) {
-			fmt.Fprintln(out, ev.Line())
-			if settings.Watch {
-				_ = sender.Send(ev.Title(), ev.Body())
-			}
+	conn map[string]state.Conn
+
+	observed func(name string, st state.Instance)
+}
+
+// load opens a core and makes it the one watched. stop ends that core.
+func (w *watcher) load(ctx context.Context, src WatchSource) (stop func(), err error) {
+	cctx, cancel := context.WithCancel(ctx)
+	c, err := src.Open(cctx)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	for _, warning := range c.Warnings() {
+		fmt.Fprintln(w.out, "lazykuma: config:", warning)
+	}
+	w.c, w.settings = c, c.Notify()
+	// The tracker is made once: it holds what was already reported, and a
+	// new one would report every ongoing outage again. Only its notify.on
+	// follows the config.
+	if w.tracker == nil {
+		w.tracker = notify.NewTracker(w.settings.On)
+	} else {
+		w.tracker.SetOn(w.settings.On)
+	}
+
+	names := make([]string, 0)
+	for _, in := range c.Instances() {
+		names = append(names, in.Name())
+	}
+	for _, name := range w.names {
+		if !slices.Contains(names, name) {
+			w.tracker.Forget(name)
+			delete(w.conn, name)
 		}
 	}
-	tick := time.NewTicker(recheck)
-	defer tick.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case u := <-c.Updates():
-			observe(u.Instance)
-		case <-tick.C:
-			for _, name := range tracker.Waiting() {
-				observe(name)
-			}
+	w.names = names
+	switch {
+	case len(names) > 0:
+		w.waiting = false
+		fmt.Fprintf(w.out, "%s  watching %s; notifying on %s\n", w.stamp(), strings.Join(names, ", "), describe(w.settings))
+	case !w.waiting:
+		w.waiting = true
+		fmt.Fprintf(w.out, "%s  no instances configured; waiting for one to be added\n", w.stamp())
+	}
+	return cancel, nil
+}
+
+// observe folds one instance's state into the tracker and reports what
+// changed.
+func (w *watcher) observe(name string) {
+	in, ok := w.c.Instance(name)
+	if !ok {
+		w.tracker.Forget(name)
+		return
+	}
+	st := in.State()
+	if was, seen := w.conn[name]; st.Conn != state.ConnConnecting && (!seen || was != st.Conn) {
+		w.conn[name] = st.Conn
+		fmt.Fprintf(w.out, "%s  %s: %s\n", w.stamp(), name, connLine(st))
+	}
+	for _, ev := range w.tracker.Observe(name, st, w.now()) {
+		fmt.Fprintln(w.out, ev.Line())
+		if w.settings.Watch {
+			_ = w.sender.Send(ev.Title(), ev.Body())
 		}
+	}
+	if w.observed != nil {
+		w.observed(name, st)
 	}
 }
+
+// stamp is the time at the head of each line Watch prints, in the format of
+// notify.Event.Line.
+func (w *watcher) stamp() string { return w.now().Local().Format("2006-01-02 15:04:05") }
 
 // connLine is an instance's connection state in words.
 func connLine(st state.Instance) string {

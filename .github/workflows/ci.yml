@@ -46,3 +46,194 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make integration
+
+  # Autostart exercised for real on throwaway runners: the registry Run key on
+  # Windows, a launchd agent on macOS. The two shells differ too much to share
+  # steps, so they are two jobs.
+  autostart-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        shell: pwsh
+        run: go build -o bin/lazykuma.exe ./cmd/lazykuma
+      - name: config with an unreachable instance
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:APPDATA 'lazykuma'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Set-Content -Path (Join-Path $dir 'config.toml') -Value "[[instance]]`nname = `"ci`"`nurl = `"http://127.0.0.1:9`"`n"
+      - name: autostart on registers the Run value and starts watch
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path bin/lazykuma.exe).Path
+          & $exe autostart on
+          if ($LASTEXITCODE -ne 0) { throw "autostart on exited $LASTEXITCODE" }
+
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          $value = (Get-ItemProperty $key).'lazykuma-watch'
+          Write-Host "Run value: $value"
+          if (-not $value -or $value -notlike '*conhost.exe --headless*') {
+            throw "Run value lazykuma-watch missing or without conhost.exe --headless"
+          }
+
+          $running = $false
+          for ($i = 0; $i -lt 20; $i++) {
+            $status = (& $exe autostart) -join "`n"
+            if ($status -match 'watch: running') { $running = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          Write-Host $status
+          if (-not $running) { throw "watch did not report running within 20 s" }
+
+          # Started headless: a visible console would have a window handle.
+          $procs = @(Get-Process lazykuma -ErrorAction SilentlyContinue)
+          if ($procs.Count -eq 0) { throw "no lazykuma process found" }
+          foreach ($p in $procs) {
+            if ($p.MainWindowHandle -ne 0) { throw "lazykuma pid $($p.Id) has a window" }
+          }
+
+          # The instance is unreachable, so watch alerts after its 30 s grace
+          # period; the line in the log proves the --log path works.
+          $log = Join-Path $env:LOCALAPPDATA 'lazykuma\watch.log'
+          $seen = $false
+          for ($i = 0; $i -lt 60; $i++) {
+            if ((Test-Path $log) -and (Select-String -Path $log -Pattern 'unreachable' -Quiet)) { $seen = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $seen) { Write-Host "::notice::no 'unreachable' line in watch.log within 60 s" }
+      - name: autostart off removes the value and stops watch
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path bin/lazykuma.exe).Path
+          & $exe autostart off
+          if ($LASTEXITCODE -ne 0) { throw "autostart off exited $LASTEXITCODE" }
+
+          $key = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+          if ($null -ne (Get-ItemProperty $key).'lazykuma-watch') {
+            throw "Run value lazykuma-watch still present"
+          }
+
+          $gone = $false
+          for ($i = 0; $i -lt 10; $i++) {
+            if (-not (Get-Process lazykuma -ErrorAction SilentlyContinue)) { $gone = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $gone) { throw "lazykuma still running 10 s after autostart off" }
+      - name: leave the runner clean
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path bin/lazykuma.exe) { & (Resolve-Path bin/lazykuma.exe).Path autostart off }
+          exit 0
+      - name: collect the log
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          Copy-Item "$env:LOCALAPPDATA\lazykuma\watch.log*" logs -ErrorAction SilentlyContinue
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autostart-windows
+          path: logs
+          if-no-files-found: warn
+
+  autostart-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        run: go build -o bin/lazykuma ./cmd/lazykuma
+      - name: config with an unreachable instance
+        run: |
+          mkdir -p "$HOME/.config/lazykuma"
+          printf '[[instance]]\nname = "ci"\nurl = "http://127.0.0.1:9"\n' > "$HOME/.config/lazykuma/config.toml"
+      - name: autostart on writes a valid agent
+        run: |
+          plist="$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
+          label=io.github.icortesb.lazykuma.watch
+          bin="$PWD/bin/lazykuma"
+          log="$HOME/Library/Logs/lazykuma/watch.log"
+          mkdir -p out
+
+          # Without a GUI session the bootstrap may fail after the plist is
+          # written; that is a runner limitation, not a bug in lazykuma.
+          gui=yes
+          if ! "$bin" autostart on; then
+            if [ ! -f "$plist" ]; then
+              echo "::error::autostart on failed and wrote no plist"; exit 1
+            fi
+            echo "::notice::autostart on failed after writing the plist (no GUI launchd domain on this runner?); skipping the running checks"
+            gui=no
+          fi
+          echo "gui=$gui" >> "$GITHUB_ENV"
+
+          if [ -f "$plist" ]; then
+            plutil -lint "$plist"
+            cat "$plist"
+          else
+            echo "::error::autostart on succeeded but wrote no plist"; exit 1
+          fi
+
+          if [ "$gui" = yes ] && ! launchctl print "gui/$(id -u)/$label"; then
+            echo "::notice::gui/$(id -u) has no $label loaded; skipping the running checks"
+            gui=no
+            echo "gui=no" >> "$GITHUB_ENV"
+          fi
+
+          if [ "$gui" = yes ]; then
+            running=no
+            for i in $(seq 20); do
+              if "$bin" autostart | tee status.txt | grep -q 'watch: running'; then running=yes; break; fi
+              sleep 1
+            done
+            cat status.txt
+            if [ "$running" != yes ]; then echo "::error::watch did not report running within 20 s"; exit 1; fi
+
+            # The instance is unreachable, so watch raises an alert after its
+            # 30 s grace period: shoot the screen once the notification shows.
+            seen=no
+            for i in $(seq 60); do
+              if grep -q unreachable "$log" 2>/dev/null; then seen=yes; break; fi
+              sleep 1
+            done
+            [ "$seen" = yes ] || echo "::notice::no 'unreachable' line in watch.log within 60 s"
+            sleep 1
+          fi
+
+          screencapture -x out/shot.png || echo "::notice::screencapture failed"
+      - name: autostart off removes the agent
+        run: |
+          plist="$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
+          if ! "$PWD/bin/lazykuma" autostart off; then
+            if [ "$gui" = no ]; then
+              echo "::notice::autostart off failed (no GUI launchd domain); removing the plist by hand"
+              rm -f "$plist"
+            else
+              echo "::error::autostart off failed"; exit 1
+            fi
+          fi
+          if [ -e "$plist" ]; then echo "::error::plist left behind after autostart off"; exit 1; fi
+      - name: leave the runner clean
+        if: always()
+        run: |
+          "$PWD/bin/lazykuma" autostart off || true
+          rm -f "$HOME/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist"
+      - name: collect the log
+        if: always()
+        run: |
+          mkdir -p out
+          cp "$HOME/Library/Logs/lazykuma/watch.log" out/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: autostart-macos
+          path: out
+          if-no-files-found: warn

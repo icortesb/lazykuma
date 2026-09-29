@@ -1,6 +1,6 @@
-// lazykuma is a terminal UI for Uptime Kuma v2, plus two commands that need
-// no terminal: watch, which reports outages until stopped, and status, which
-// answers once for a status bar or a script.
+// lazykuma is a terminal UI for Uptime Kuma v2, plus commands that need no
+// terminal: watch, which reports outages until stopped, status, which answers
+// once for a status bar or a script, and autostart, which runs watch at login.
 package main
 
 import (
@@ -11,17 +11,23 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/icortesb/lazykuma/internal/autostart"
 	"github.com/icortesb/lazykuma/internal/commands"
 	"github.com/icortesb/lazykuma/internal/config"
 	"github.com/icortesb/lazykuma/internal/core"
 	"github.com/icortesb/lazykuma/internal/kuma"
+	"github.com/icortesb/lazykuma/internal/logfile"
 	"github.com/icortesb/lazykuma/internal/notify"
 	"github.com/icortesb/lazykuma/internal/ui"
+	"github.com/icortesb/lazykuma/internal/watchlock"
 )
 
 // version is stamped by the Makefile from git describe.
@@ -35,6 +41,7 @@ usage:
   lazykuma status [--json] [--timeout 10s]
                                  print the state once; exit 0 up, 1 down, 2 unreachable
                                  (always 0 with --json: the class carries the state)
+  lazykuma autostart [on|off]    run watch in the background at login
   lazykuma --version             print the version
 `
 
@@ -52,6 +59,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return fail(stderr, tui())
 	case "watch":
 		return watch(args[1:], stdout, stderr)
+	case "autostart":
+		return autostartCmd(args[1:], stdout, stderr)
 	case "status":
 		return status(args[1:], stdout, stderr)
 	case "-version", "--version", "version":
@@ -79,6 +88,12 @@ func open(ctx context.Context) (*core.Core, error) {
 	if err != nil {
 		return nil, err
 	}
+	return openAt(ctx, cfgPath, tokPath)
+}
+
+// openAt reads the config and tokens at these paths and starts every
+// instance under ctx.
+func openAt(ctx context.Context, cfgPath, tokPath string) (*core.Core, error) {
 	c, err := core.Open(cfgPath, tokPath, core.Options{})
 	if err != nil {
 		return nil, err
@@ -95,7 +110,12 @@ func tui() error {
 		return err
 	}
 
-	p := tea.NewProgram(ui.New(ui.Deps{Core: c, Login: kuma.Login, Version: version}), tea.WithAltScreen())
+	deps := ui.Deps{Core: c, Login: kuma.Login, Version: version}
+	// Without a manager (no home directory, say) the menu hides the switch.
+	if a, err := autostart.Default(); err == nil {
+		deps.Autostart = a
+	}
+	p := tea.NewProgram(ui.New(deps), tea.WithAltScreen())
 
 	// Every change the core announces becomes a message for the program,
 	// and a desktop notification when the config asks for one.
@@ -144,21 +164,181 @@ func watch(args []string, stdout, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintln(stderr, "usage: lazykuma watch\n\nPrints every outage and recovery until stopped, and raises a desktop\nnotification unless [notify] watch = false.")
 	}
+	// Hidden: the entries that start watch at login have no terminal, so
+	// its output goes to a file instead.
+	toLog := fs.Bool("log", false, "write output to the watch log")
 	if code, done := parse(fs, args); done {
 		return code
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	c, err := open(ctx)
+	cfgPath, tokPath, err := config.Paths()
 	if err != nil {
 		return fail(stderr, err)
 	}
-	warn(stderr, c)
+	lockPath, logPath, err := autostart.StatePaths()
+	if err != nil {
+		return fail(stderr, err)
+	}
+
+	// Under the Run key or XDG autostart nobody sees stderr, so with --log
+	// every message goes to the file as well, startup errors included. The
+	// log comes first so a broken stderr cannot keep lines out of it.
+	// Errors before the log is open (paths, opening it) can only reach stderr.
+	out, msgs := stdout, stderr
+	if *toLog {
+		l, err := logfile.Open(logPath, 1<<20)
+		if err != nil {
+			return fail(stderr, err)
+		}
+		defer l.Close()
+		out, msgs = l, &logMsgs{log: l, stderr: stderr}
+	}
+
+	// A status probe holds the lock for an instant; waiting a second keeps
+	// it from making a starting watch give up.
+	lock, err := watchlock.AcquireWait(lockPath, time.Second)
+	if err != nil {
+		return fail(msgs, err)
+	}
+	defer lock.Release()
+
+	src := commands.WatchSource{
+		Open:  func(ctx context.Context) (*core.Core, error) { return openAt(ctx, cfgPath, tokPath) },
+		Stamp: func() string { return config.Stamp(cfgPath, tokPath) },
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	desktop := notify.Async(notify.Desktop{}, func(err error) {
-		fmt.Fprintln(stderr, "lazykuma: desktop notification:", err)
+		fmt.Fprintln(msgs, "lazykuma: desktop notification:", err)
 	})
-	return fail(stderr, commands.Watch(ctx, c, desktop, stdout, time.Now))
+	return fail(msgs, commands.Watch(ctx, src, desktop, out, time.Now))
+}
+
+// logMsgs sends a message to the watch log, stamped like the lines Watch
+// writes there, and to stderr. The log goes first and a stderr that fails
+// (no console under the Run key) is ignored: the log is the record.
+type logMsgs struct{ log, stderr io.Writer }
+
+func (m *logMsgs) Write(p []byte) (int, error) {
+	stamp := time.Now().Local().Format("2006-01-02 15:04:05")
+	if _, err := fmt.Fprintf(m.log, "%s  %s", stamp, p); err != nil {
+		return 0, err
+	}
+	_, _ = m.stderr.Write(p)
+	return len(p), nil
+}
+
+// autostartCmd shows, enables or disables the watch at login.
+func autostartCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("autostart", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprintln(stderr, "usage: lazykuma autostart [on|off]\n\nWith no argument, shows whether watch starts at login. on registers this\nbinary and restarts the background watch with it; off removes it and stops it.")
+	}
+	arg := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		arg, args = args[0], args[1:]
+	}
+	if code, done := parse(fs, args); done {
+		return code
+	}
+	if arg != "" && arg != "on" && arg != "off" {
+		fmt.Fprintf(stderr, "lazykuma autostart: unexpected %q\n", arg)
+		fs.Usage()
+		return 2
+	}
+
+	m, err := autostart.Default()
+	if err != nil {
+		return autostartFail(stderr, err)
+	}
+	return runAutostart(m, arg, stdout, stderr)
+}
+
+func runAutostart(m *autostart.Manager, arg string, stdout, stderr io.Writer) int {
+	switch arg {
+	case "on":
+		if err := m.Enable(); err != nil {
+			return autostartFail(stderr, err)
+		}
+	case "off":
+		if err := m.Disable(); err != nil {
+			return autostartFail(stderr, err)
+		}
+		fmt.Fprintln(stdout, "background alerts: off")
+		return 0
+	}
+	st, err := m.Status()
+	if err != nil {
+		return autostartFail(stderr, err)
+	}
+	fmt.Fprint(stdout, autostartText(st))
+	return 0
+}
+
+func autostartFail(stderr io.Writer, err error) int {
+	fmt.Fprintln(stderr, "lazykuma: autostart:", err)
+	return 1
+}
+
+// autostartText is what "lazykuma autostart" prints. A watch that runs while
+// autostart is off was started by hand.
+func autostartText(st autostart.Status) string {
+	var b strings.Builder
+	if st.On {
+		fmt.Fprintf(&b, "background alerts: on (%s)\nruns: %s\n", st.Kind, st.Path)
+	} else {
+		b.WriteString("background alerts: off\n")
+	}
+	switch {
+	case !st.Running:
+		b.WriteString("watch: not running\n")
+	case st.On:
+		fmt.Fprintf(&b, "watch: running (pid %d)\n", st.PID)
+	default:
+		fmt.Fprintf(&b, "watch: running (pid %d), started by hand\n", st.PID)
+	}
+	return b.String()
+}
+
+// binaryWarning is the message for a registered watch that is not this
+// binary, or "" when they match. Both paths are resolved first, since the
+// registered one may go through a symlink such as a Homebrew shim, and
+// Windows paths differ by case only.
+func binaryWarning(registered, current string) string {
+	same := func(a, b string) bool {
+		a, b = resolve(a), resolve(b)
+		if runtime.GOOS == "windows" {
+			return strings.EqualFold(a, b)
+		}
+		return a == b
+	}
+	if registered == "" || same(registered, current) {
+		return ""
+	}
+	return fmt.Sprintf("lazykuma: background alerts run %s, not this binary (%s); run \"lazykuma autostart on\" to switch", registered, current)
+}
+
+func resolve(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// warnBinary tells a status caller that the background watch is another
+// binary. It only reads the registration, no command and no lock probe, so
+// a status bar polling every few seconds pays nothing; its errors are
+// ignored because status must never fail because of autostart.
+func warnBinary(stderr io.Writer, m *autostart.Manager) {
+	on, path, err := m.Registered()
+	if err != nil || !on {
+		return
+	}
+	if w := binaryWarning(path, m.Exe); w != "" {
+		fmt.Fprintln(stderr, w)
+	}
 }
 
 // parse reads a subcommand's flags. done means the command must stop here
@@ -203,5 +383,8 @@ func status(args []string, stdout, stderr io.Writer) int {
 		return commands.Failed(*asJSON, err, stdout)
 	}
 	warn(stderr, c)
+	if m, err := autostart.Default(); err == nil {
+		warnBinary(stderr, m)
+	}
 	return commands.Status(ctx, c, *timeout, *asJSON, stdout)
 }

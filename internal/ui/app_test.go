@@ -459,6 +459,10 @@ func TestHelpAndQuit(t *testing.T) {
 	if !strings.Contains(h.view(), "What lazykuma stores") {
 		t.Fatalf("help:\n%s", h.view())
 	}
+	// A terminal shows Markdown quotes as they are.
+	if v := h.view(); !strings.Contains(v, "or lazykuma autostart.") || strings.Contains(v, "`") {
+		t.Errorf("help does not name the command plainly:\n%s", v)
+	}
 	h.press("esc")
 	if !strings.Contains(h.view(), "Add instance") {
 		t.Fatal("esc did not leave help")

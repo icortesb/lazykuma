@@ -26,6 +26,8 @@ type Deps struct {
 	Login func(ctx context.Context, url, username, password, code string) (string, error)
 
 	Version string
+	// Autostart is the background alerts switch; nil hides its menu entry.
+	Autostart Autostart
 }
 
 // InstanceState is one instance's state, sent in by main with
@@ -131,6 +133,8 @@ type Model struct {
 	picking string // "monitor", "rawtype", "channel", "move", "delgroup" or "pagemon", for what the picker chose
 
 	flash string
+
+	bg bgAlerts // the background alerts switch of the menu
 }
 
 const noInstances = "no instances yet: add one"
@@ -150,10 +154,16 @@ func New(d Deps) Model {
 	case len(m.insts) == 0:
 		m.flash = noInstances
 	}
+	m.bg.busy = d.Autostart != nil
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+func (m Model) Init() tea.Cmd {
+	if m.deps.Autostart == nil {
+		return nil
+	}
+	return readBgStatus(m.deps.Autostart)
+}
 
 // Messages of the app's own commands.
 type (
@@ -463,6 +473,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loginDone:
 		return m.loginFinished(msg)
 
+	case bgStatus:
+		return m.bgStatusRead(msg)
+	case bgToggled:
+		return m.bgToggled(msg)
+
 	case flashMsg:
 		m.flash = msg.text
 		return m, nil
@@ -568,8 +583,12 @@ func (m Model) menuItems() []menuItem {
 	for i, in := range m.insts {
 		items = append(items, menuItem{label: in.name(), desc: instanceDesc(in.url(), in.st), inst: i, target: screenInstance})
 	}
+	items = append(items,
+		menuItem{label: "Add instance", desc: "Watch another Uptime Kuma", inst: -1, target: screenAdd})
+	if m.deps.Autostart != nil {
+		items = append(items, m.bg.item())
+	}
 	return append(items,
-		menuItem{label: "Add instance", desc: "Watch another Uptime Kuma", inst: -1, target: screenAdd},
 		menuItem{label: "Help", desc: "Keys, and what lazykuma stores", inst: -1, target: screenHelp},
 		menuItem{label: "Quit", inst: -1, target: screenMenu},
 	)
@@ -591,6 +610,8 @@ func (m Model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case chosen.label == "Quit" && chosen.inst < 0:
 		return m, tea.Quit
+	case chosen.bg:
+		return m.toggleBgAlerts()
 	case chosen.inst >= 0:
 		return m.openInstance(chosen.inst)
 	case chosen.target == screenAdd:
@@ -901,5 +922,7 @@ func helpText() string {
 	} {
 		b.WriteString("  " + styleValue.Render(line) + "\n")
 	}
+	b.WriteString("\n" + styleHeading.Render("Background alerts") + "\n\n")
+	b.WriteString("  " + styleValue.Render("Keep them coming with lazykuma closed: the menu switch, or lazykuma autostart.") + "\n")
 	return b.String()
 }

@@ -133,18 +133,43 @@ notification (D-Bus on Linux, Notification Center on macOS, toasts on Windows). 
 monitor has when watch starts is its starting point, so a fresh start never raises an alert per
 monitor. An instance that drops is reported only after 30 seconds unreachable, so a Kuma restart
 does not raise an alert. Every connection change is printed too, including a refused login token,
-so a watch that can no longer see an instance says so. Run it in a tmux pane, or as a service:
+so a watch that can no longer see an instance says so. Run it in a tmux pane, or let lazykuma start
+it at login (below). It follows the config: an instance added, removed or logged in to from the
+terminal UI is picked up within ten seconds, without a restart. Only one watch runs at a time; a
+second one says which is running and exits.
 
-```ini
-# ~/.config/systemd/user/lazykuma-watch.service
-[Service]
-ExecStart=%h/go/bin/lazykuma watch
-Restart=on-failure
-RestartSec=30
+### Background alerts
 
-[Install]
-WantedBy=default.target
-```
+`lazykuma autostart on` registers `lazykuma watch` to start at login and starts it now;
+`lazykuma autostart off` removes it and stops it; `lazykuma autostart` alone says whether it is on
+and whether a watch runs. The **Background alerts** switch in the menu does the same.
+Nothing needs admin rights; each system gets its own mechanism, and its own place for the output:
+
+| System | Registered as | Output |
+|---|---|---|
+| Linux with a systemd user session | `~/.config/systemd/user/lazykuma-watch.service` | `journalctl --user -u lazykuma-watch` |
+| Linux without one | `~/.config/autostart/lazykuma-watch.desktop` (XDG autostart) | `watch.log` in the state folder |
+| macOS | `~/Library/LaunchAgents/io.github.icortesb.lazykuma.watch.plist` | `~/Library/Logs/lazykuma/watch.log` |
+| Windows | a `lazykuma-watch` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` | `watch.log` in the state folder |
+
+`watch.log` stops at 1 MB: it then becomes `watch.log.1`, replacing the previous one, and a new file
+starts. On macOS launchd writes the log itself, and it is not trimmed.
+
+`on` registers the binary you run it with, so run it again after moving lazykuma; `lazykuma status`
+warns when the registered binary is not the one running. The systemd unit and the launch agent
+carry your `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME`, if set, so the watch reads the same config as
+the terminal.
+
+A watch you started by hand in a terminal meets the background one differently per system:
+
+- With XDG autostart and on Windows nothing supervises the watch, so `on` and `off` stop whatever
+  watch runs, yours included, and `on` starts the registered one in its place.
+- systemd and launchd leave yours alone. It keeps running, and the service tries again every 30
+  seconds until yours stops, then takes over.
+
+On systemd, `off` needs the user session to answer while the unit file is there (`systemctl --user`
+must work): without it the unit cannot be stopped, and `off` says so rather than leave a service
+behind. Written by hand before lazykuma could do it, a unit at the same path is taken over by `on`.
 
 ### `lazykuma status`
 
@@ -196,6 +221,9 @@ on = "down"      # "down", or "changes" to hear about recoveries too
 - `~/.local/state/lazykuma/tokens.json` (`%LocalAppData%\lazykuma` on Windows): the login token
   of each instance, readable only by you (on Windows, kept in your user profile folder, which
   other users cannot read).
+- `watch.lock` and `watch.log`, next to `tokens.json` (the state folder): the process id of the
+  running watch, and what a background watch printed, the log readable only by you. On macOS the
+  log is `~/Library/Logs/lazykuma/watch.log` instead.
 
 `$XDG_CONFIG_HOME` and `$XDG_STATE_HOME` are honoured, if set, in place of `~/.config` and
 `~/.local/state`.

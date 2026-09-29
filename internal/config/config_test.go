@@ -341,3 +341,28 @@ func TestTokensOldFormatIgnored(t *testing.T) {
 		t.Fatalf("Get of an old-format entry = %q, want \"\"", got)
 	}
 }
+
+func TestStampChangesWithTheFiles(t *testing.T) {
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+	missing := Stamp(a, b)
+	if missing != "- -" {
+		t.Fatalf("missing files stamp %q", missing)
+	}
+	if err := os.WriteFile(a, []byte("one"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	written := Stamp(a, b)
+	if written == missing {
+		t.Fatal("creating a file left the stamp alone")
+	}
+	if Stamp(a, b) != written {
+		t.Fatal("the stamp changed with nothing written")
+	}
+	if err := os.WriteFile(a, []byte("longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if Stamp(a, b) == written {
+		t.Fatal("rewriting a file left the stamp alone")
+	}
+}
