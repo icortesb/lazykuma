@@ -13,6 +13,9 @@ builds:
 
 archives:
   - formats: [tar.gz]
+    # No version in the name, so releases/latest/download/<name> is a
+    # link that never changes.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
         formats: [zip]
